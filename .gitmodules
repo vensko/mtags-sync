@@ -1,0 +1,3 @@
+[submodule "getID3"]
+	path = getID3
+	url = https://github.com/vensko/getID3
