@@ -39,7 +39,16 @@ class TagSync
 	public $convertPaths = false;
 	public $dirTags = '!';
 	public $dir_chmod = 0755;
-	public $mediaExtensions = ['flac', 'mp3', 'm4a'];
+
+	public $mediaTypes = [
+		'flac' => 'vorbiscomment',
+		'ape' => 'ape',
+		'wv' => 'ape',
+		'iso.wv' => 'ape',
+		'm4a' => 'quicktime',
+		'mp3' => ['id3v1','id3v2']
+	];
+
 	public $isWindows = false;
 	public $win = '';
 
@@ -54,6 +63,8 @@ class TagSync
 	protected $currentTask = '';
 
 	protected $brokenLibraryFiles = [];
+
+	protected $localEncodings = ['CP1251', 'CP1252', 'ISO-8859-1'];
 
 	/**
 	 * Parses command lines parameters
@@ -71,10 +82,12 @@ class TagSync
 			}
 		}
 
-		require_once(__DIR__.'/getID3/getid3/getid3.php');
+		require_once __DIR__.'/getID3/getid3/getid3.php';
+		require_once __DIR__.'/getID3/getid3/module.misc.cue.php';
 
-		$this->id3 = new getID3;
-		$this->id3->win = $this->win;
+		getID3::$mtags = $this;
+
+		$this->id3 = new getID3();
 	}
 
 	public function parseArgs()
@@ -235,34 +248,37 @@ TXT;
 		}
 
 		foreach ($dirs as $dir) {
-			if (!$tags = $this->analyzeDirectory($dir)) {
+			if (!$mediums = $this->analyzeDirectory($dir[0], $dir[1])) {
 				echo "No candidates found in ".$dir[0].", skipping.\n\n";
 				continue;
 			}
 
-			if (!$libraryId = $this->getDurationId($tags)) {
-				echo "- No durations, skipping:\n".$dir[0]."\n\n";
-				continue;
-			}
-
-			if (isset($this->library[$libraryId]) && !in_array($libraryId, $this->brokenLibraryFiles)) {
-				$this->library[$libraryId]->exists = true;
-				continue;
-			}
-
-			if (isset($this->library[$libraryId])) {
-				$libraryItem = $this->library[$libraryId];
-				echo ". Found directory to fix file paths in:\n".$libraryItem->realPath."\n-> ".$dir[0]."\n";
-				if ($this->library[$libraryId]->setPaths($tags) && $this->library[$libraryId]->save()) {
-					echo "+ Successfully saved.\n\n";
-				} else {
-					echo "- Hmm, nothing changed.\n\n";
+			foreach ($mediums as $baseName => $medium) {
+				if (!$libraryId = $this->getDurationId($medium)) {
+					echo "- No durations, skipping:\n".$dir[0]."\n\n";
+					continue;
 				}
-			} else {
-				echo ". New release to add:\n".$dir[0]."\n";
-				if ($libraryItem = $this->addToLibrary($libraryId, $dir[0], $tags)) {
-					$this->library[$libraryId] = $libraryItem;
-					echo "+ Successfully saved.\n\n";
+
+				if (isset($this->library[$libraryId]) && !in_array($libraryId, $this->brokenLibraryFiles)) {
+					$this->library[$libraryId]->exists = true;
+					continue;
+				}
+
+				if (isset($this->library[$libraryId])) {
+					$libraryItem = $this->library[$libraryId];
+					echo ". Found directory to fix file paths in:\n".$libraryItem->realPath."\n-> ".$dir[0]."\n";
+					if ($this->library[$libraryId]->setPaths($medium) && $this->library[$libraryId]->save()) {
+						echo "+ Successfully saved.\n\n";
+					} else {
+						echo "- Hmm, nothing changed.\n\n";
+					}
+				} else {
+					$basePath = $baseName ? $dir[0].DS.$baseName : $dir[0];
+					echo ". New release to add:\n".$basePath."\n";
+					if ($libraryItem = $this->addToLibrary($libraryId, $basePath, $medium)) {
+						$this->library[$libraryId] = $libraryItem;
+						echo "+ Successfully saved.\n\n";
+					}
 				}
 			}
 		}
@@ -280,85 +296,198 @@ TXT;
 		}
 	}
 
-	/**
-	 * @param $dir
-	 * @return array
-	 */
-	protected function analyzeDirectory($dir)
+	protected function parseMediaTags($file, $dir, $cue = null, &$mediums = [])
 	{
-		if (is_string($dir)) {
-			if (!file_exists($this->win.$dir)) {
-				echo "Directory not found: ".$dir;
-				return [];
-			}
-			$files = scandir($this->win.$dir);
-			$files = array_diff($files, ['..', '.']);
-		} else {
-			$files = $dir[1];
-			$dir = $dir[0];
+		$ext = $this->mb_ext($file);
+
+		if (!isset($this->mediaTypes[$ext])) {
+			return false;
 		}
 
-		$results = [];
+		$data = $this->id3->analyze($dir.DS.$file);
 
-		foreach ($files as $file) {
-			$ext = $this->mb_ext($file);
+		$tags = [];
+		foreach ((array)$this->mediaTypes[$ext] as $tagType) {
+			if (!empty($data['tags'][$tagType])) {
+				$tags = $this->flattenTags($data['tags'][$tagType]);
+				break;
+			}
+		}
 
-			if (!in_array($ext, $this->mediaExtensions)) {
-				continue;
+		if ($cue || !empty($tags['CUESHEET'])) {
+			if (!empty($tags['CUESHEET'])) {
+				$cue = null;
 			}
 
-			$data = $this->id3->analyze($dir.DS.$file);
+			$cueData = $cue ? $cue[1] : $this->utf8($tags['CUESHEET']);
+			$cueData = (new getid3_cue($this->id3))->readCueSheet($cueData);
 
-			if (!$data) {
-				continue;
-			}
+			$cueTags = !empty($cueData['comments']) ? $this->flattenTags($cueData['comments']) : [];
 
-			if (!isset($data['playtime_seconds'])) {
-				echo "Couldn't determine duration of ".$file.", skipping.\n";
-				continue;
-			}
+			if (!empty($cueData['tracks'])) {
+				$tracks = [];
 
-			$entry = [
-				static::PATH_KEY => ($this->isWindows ? '/' : '').str_replace(DS, '/', $dir).'/'.$file,
-				static::DURATION_KEY => number_format($data['playtime_seconds'], 7, '.', '')
-			];
+				foreach ($cueData['tracks'] as $num => $track) {
+					$trackEntry = [];
 
-			$tags = [];
-
-			switch ($ext) {
-				case 'flac':
-					$tags = !empty($data[$ext]['comments']) ? $data[$ext]['comments'] : [];
-					break;
-				case 'mp3':
-					$tags = !empty($data['tags']['id3v2']) ? $data['tags']['id3v2'] : (!empty($data['tags']['id3v1']) ? $data['tags']['id3v1'] : []);
-					break;
-				case 'm4a':
-					$tags = !empty($data['tags']['quicktime']) ? $data['tags']['quicktime'] : [];
-			}
-
-			if ($tags) {
-				$tags = array_map(function ($tag) {
-					$tag = array_filter($tag, [$this, 'isNotEmptyString']);
-					return $tag ? (count($tag) === 1 ? reset($tag) : $tag) : '';
-				}, $tags);
-
-				$tags = array_filter($tags, [$this, 'isNotEmptyString']);
-				$tags = array_change_key_case($tags, CASE_UPPER);
-
-				foreach ($tags as $key => $tag) {
-					if (is_array($tag) && $tag && !is_int(array_keys($tag)[0])) {
-						$tags += $tag;
-						unset($tags[$key]);
+					if (!empty($track['performer'])) {
+						$trackEntry['ARTIST'] = $track['performer'];
 					}
+					if (!empty($track['track_number'])) {
+						$trackEntry['TRACKNUMBER'] = $track['track_number'];
+					}
+					if (!empty($track['title'])) {
+						$trackEntry['TITLE'] = $track['title'];
+					}
+
+					$trackEntry = array_merge($cueTags, $tags, $trackEntry);
+
+					unset($trackEntry['CUESHEET']);
+
+					$entry = [
+						static::PATH_KEY => ($this->isWindows ? '/' : '').str_replace(DS, '/', $dir).'/'.($cue ? $cue[0] : $file).'|'.($num + 1)
+					];
+
+					if ($duration = $this->getCueTrackDuration($data, $cueData, $num)) {
+						$entry[static::DURATION_KEY] = $duration;
+					}
+
+					$entry += $trackEntry;
+
+					$tracks[] = $entry;
 				}
 
-				$entry += $tags;
+				if ($mediums) {
+					$key = $cue ? $cue[0] : $file;
+					$mediums[$key] = $tracks;
+				} else {
+					$mediums[] = $tracks;
+				}
+			} else {
+				return false;
 			}
 
-			$results[] = $entry;
+		} else {
+			if (!isset($data['playtime_seconds'])) {
+				echo "Couldn't determine duration of ".$file.", skipping.\n";
+				return false;
+			}
+
+			if (!$mediums) {
+				$mediums[0] = [];
+			}
+
+			$mediums[0][] = [
+				static::PATH_KEY => ($this->isWindows ? '/' : '').str_replace(DS, '/', $dir).'/'.$file,
+				static::DURATION_KEY => $this->formatDuration($data['playtime_seconds'])
+			] + $tags;
+		}
+	}
+
+	protected function formatDuration($seconds)
+	{
+		return number_format($seconds, 7, '.', '');
+	}
+
+	protected function countFrames($index)
+	{
+		return $index['frames'] + $index['seconds'] * 75 + $index['minutes'] * 60 * 75;
+	}
+
+	protected function getCueTrackDuration($data, $cueData, $num)
+	{
+		if (empty($cueData['tracks'][$num]['index'][1])) {
+			return false;
 		}
 
-		return $results;
+		$startFrame = $this->countFrames($cueData['tracks'][$num]['index'][1]);
+
+		if (isset($cueData['tracks'][$num+1]['index'][0])) {
+			$endFrame = $this->countFrames($cueData['tracks'][$num+1]['index'][0]);
+		} else if (isset($cueData['tracks'][$num+1]['index'][1])) {
+			$endFrame = $this->countFrames($cueData['tracks'][$num+1]['index'][1]);
+		} else {
+			if (isset($data['playtime_seconds'])) {
+				$endFrame = ceil($data['playtime_seconds'] * 75);
+			} else {
+				// Dirty hack for iso.wv
+				$endFrame = $startFrame + 75 * 3;
+			}
+		}
+
+		$duration = $endFrame - $startFrame;
+		$duration = $this->formatDuration($duration / 75);
+
+		return $duration;
+	}
+
+	protected function flattenTags(array $tags = [])
+	{
+		$tags = array_map(function ($tag) {
+			$tag = array_filter($tag, [$this, 'isNotEmptyString']);
+			return $tag ? (count($tag) === 1 ? reset($tag) : $tag) : '';
+		}, $tags);
+
+		$tags = array_filter($tags, [$this, 'isNotEmptyString']);
+		$tags = array_change_key_case($tags, CASE_UPPER);
+
+		foreach ($tags as $key => $tag) {
+			if (is_array($tag) && $tag && !is_int(array_keys($tag)[0])) {
+				$tags += $tag;
+				unset($tags[$key]);
+			}
+		}
+
+		unset($tags['PICTURE']);
+
+		array_walk_recursive($tags, function(&$tag){
+			$tag = $this->utf8(trim(trim($tag), '"'));
+		});
+
+		return $tags;
+	}
+
+	/**
+	 * @param callable $func
+	 * @param array $arr
+	 * @return array
+	 */
+	function array_map_recursive(callable $func, array $arr)
+	{
+		array_walk_recursive($arr, function (&$v) use ($func) {
+			$v = $func($v);
+		});
+
+		return $arr;
+	}
+
+	/**
+	 * @param $dir
+	 * @param array $files
+	 * @return array
+	 */
+	protected function analyzeDirectory($dir, array $files = [])
+	{
+		$cueFiles = [];
+
+		foreach ($files as $file) {
+			if ($this->mb_ext($file) === 'cue') {
+				$contents = $this->utf8(file_get_contents($this->win.$dir.DS.$file));
+				$refFiles = preg_match_all('/^\s*FILE\s+[\'"]?([^\'"]+)[\'"]?/m', $contents, $matches);
+				if ($refFiles === 1) {
+					$cueFiles[$matches[1][0]] = [$file, $contents];
+				}
+			}
+		}
+
+		$mediums = [];
+
+		foreach ($files as $file) {
+			$cue = isset($cueFiles[$file]) ? $cueFiles[$file] : null;
+			$this->parseMediaTags($file, $dir, $cue, $mediums);
+		}
+
+		return $mediums;
 	}
 
 	/**
@@ -477,7 +606,7 @@ TXT;
 				}
 			}
 
-			if ($brokenFile) {
+			if ($brokenFile || $needsConverting) {
 				echo "\n";
 			}
 		}
@@ -563,7 +692,7 @@ TXT;
 	}
 
 	/**
-	 * Recursively walks through directory tree and collects file names with needed extensions
+	 * Recursively walks through directory tree and collects directories or file names with needed extensions
 	 *
 	 * @param string $rootDir
 	 * @param bool $findTags
@@ -591,7 +720,7 @@ TXT;
 					if ($ext === static::EXT) {
 						$result[] = $rootDir.DS.$path;
 					}
-				} else if (!$dirAdded && in_array($ext, $this->mediaExtensions)) {
+				} else if (!$dirAdded && isset($this->mediaTypes[$ext])) {
 					$result[] = [$rootDir, $contents];
 					$dirAdded = true;
 				}
@@ -638,7 +767,13 @@ TXT;
 	 */
 	public function mb_ext($path)
 	{
-		return mb_strrpos($path, '.') === false ? '' : mb_strtolower(mb_substr($path, mb_strrpos($path, '.') + 1));
+		$ext = mb_strrpos($path, '.') === false ? '' : mb_strtolower(mb_substr($path, mb_strrpos($path, '.') + 1));
+
+		if ($ext === 'wv' && mb_substr($path, -7) === '.iso.wv') {
+			return 'iso.wv';
+		}
+
+		return $ext;
 	}
 
 	/**
@@ -748,6 +883,27 @@ TXT;
 
 		return true;
 	}
+
+	/**
+	 * Ensures that a string is UTF-8 encoded
+	 *
+	 * @param $str
+	 * @return bool|string
+	 */
+	public function utf8($str)
+	{
+		if (mb_check_encoding($str, 'UTF-8')) {
+			return $str;
+		}
+
+		foreach ($this->localEncodings as $enc) {
+			if (mb_check_encoding($str, $enc)) {
+				return mb_convert_encoding($str, 'UTF-8', $enc);
+			}
+		}
+
+		return false;
+	}
 }
 
 /**
@@ -813,7 +969,7 @@ class LibraryItem
 				echo "Failed to create directory ".$destFileDir."\nSkipping: ".$this->realPath."\n\n";
 				return false;
 			}
-			// Workaround for asynchronous file systems (like Samba)
+			// Workaround for asynchronous file systems like Samba
 			$t = 0;
 			while (!file_exists($this->sync->win.$destFileDir)) {
 				$t++;
@@ -829,29 +985,40 @@ class LibraryItem
 		$k = TagSync::PATH_KEY;
 
 		if ($this->sync->relativePaths && ($this->sync->convertPaths || !file_exists($this->sync->win.$this->realPath))) {
-			foreach ($this->tags as &$tag) {
+			foreach ($this->tags as $i => $tag) {
 				if ($this->sync->isWindows) {
-					$tag[$k] = $this->sync->mb_trim($tag[$k], '/');
+					$this->tags[$i][$k] = $this->sync->mb_trim($this->tags[$i][$k], '/');
 				}
-				$tag[$k] = $this->sync->findRelativePath($this->sync->mb_dirname($this->realPath), $tag[$k]);
-				$tag[$k] = str_replace(DS, '/', $tag[$k]);
+				$this->tags[$i][$k] = $this->sync->findRelativePath($this->sync->mb_dirname($this->realPath), $this->tags[$i][$k]);
+				$this->tags[$i][$k] = str_replace(DS, '/', $this->tags[$i][$k]);
 			}
 		}
 
 		if ($this->sync->isWindows) {
-			foreach ($this->tags as &$tag) {
-				if (mb_strpos($tag[$k], ':') !== false) {
-					$tag[$k] = strtoupper(mb_substr($tag[$k], 0, 2)).mb_substr($tag[$k], 2);
+			foreach ($this->tags as $i => $tag) {
+				if (mb_strpos($this->tags[$i][$k], ':') !== false) {
+					$this->tags[$i][$k] = strtoupper(mb_substr($this->tags[$i][$k], 0, 2)).mb_substr($this->tags[$i][$k], 2);
 				}
 			}
 		}
 
+		$json = json_encode(
+			$this->tags,
+			JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
+		);
+
+		if (!$json) {
+			if (json_last_error() === 5) {
+				dd($this->tags);
+			}
+
+			echo "Invalid JSON input: ".json_last_error()."\n\n";
+			return false;
+		}
+
 		$result = file_put_contents(
 			$this->sync->win.$this->realPath,
-			chr(0xEF).chr(0xBB).chr(0xBF).json_encode(
-				$this->tags,
-				JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
-			)
+			chr(0xEF).chr(0xBB).chr(0xBF).$json
 		);
 
 		if ($result) {
