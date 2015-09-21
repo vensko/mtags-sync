@@ -21,7 +21,8 @@ $getid3modules = [
 	'module.misc.iso',
 	'module.misc.cue',
 	'module.tag.',
-	'module.audio-video.riff'
+	'module.audio-video.riff',
+	'module.audio-video.quicktime'
 ];
 
 foreach (glob(__DIR__.'/getID3/getid3/*.php') as $file) {
