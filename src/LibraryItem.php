@@ -5,7 +5,8 @@
  */
 class LibraryItem
 {
-	public $sync, $id, $realPath, $tags, $exists;
+	public $sync, $id, $realPath, $tags, $exists,
+		$fixedPaths = false;
 
 	/**
 	 * @param TagSync $sync
@@ -45,6 +46,10 @@ class LibraryItem
 			}
 		}
 
+		if ($changed) {
+			$this->fixedPaths = true;
+		}
+
 		return $changed;
 	}
 
@@ -80,7 +85,7 @@ class LibraryItem
 
 		$k = TagSync::PATH_KEY;
 
-		if ($this->sync->relativePaths && ($this->sync->convertPaths || !file_exists($this->sync->win.$this->realPath))) {
+		if ($this->sync->relativePaths && ($this->fixedPaths || $this->sync->convertPaths || !file_exists($this->sync->win.$this->realPath))) {
 			foreach ($this->tags as $i => $tag) {
 				if ($this->sync->isWindows) {
 					$this->tags[$i][$k] = $this->sync->mb_trim($this->tags[$i][$k], '/');

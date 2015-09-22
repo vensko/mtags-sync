@@ -122,13 +122,13 @@ TXT;
 
 		if (!$this->destDir || !is_dir($this->win.$this->destDir)) {
 			if (!$this->mkdir($this->destDir, $this->dir_chmod, true)) {
-				echo "Failed to create the destination directory. Create it manually.";
+				echo "Failed to create the destination directory. Create it manually.\n";
 				exit;
 			}
 		}
 
 		if (!$this->srcDir || !is_dir($this->win.$this->srcDir)) {
-			echo "Source directory not found.";
+			echo "Source directory not found.\n";
 			exit;
 		}
 
@@ -138,7 +138,7 @@ TXT;
 
 		if ($this->orphanDir && is_string($this->orphanDir) && !is_dir($this->win.$this->orphanDir)) {
 			if (!$this->mkdir($this->orphanDir, $this->dir_chmod, true)) {
-				echo "Failed to create directory for orphaned tags ".$this->orphanDir.", please, create it manually.";
+				echo "Failed to create directory for orphaned tags ".$this->orphanDir.", please, create it manually.\n";
 				exit;
 			}
 		}
