@@ -11,21 +11,29 @@ class TagSync
 	const WIN_WRAPPER = 'wfio://';
 	const ORPHAN_DIR = '!DELETED';
 	const PATH_KEY = '@';
+	const TITLE_KEY = 'TITLE';
+	const SIZE_KEY = '@SIZE';
+	const MD5_KEY = '@MD5';
+	const INDEX_KEY = '@INDEX';
+	const FP_KEY = '@FP';
 	const DURATION_KEY = 'DURATION';
 
-	public $srcDir, $destDir, $destFile, $orphanDir;
+	public $origSrcDir, $origDestDir, $srcDir, $destDir, $destFile, $orphanDir;
 	public $relativePaths = false;
 	public $convertPaths = false;
 	public $dir_chmod = 0755;
+
+	public $emulation = false;
+	public $verbose = false;
 
 	/**
 	 * @var array
 	 */
 	public $mediaTypes = [
 		'flac' => 'vorbiscomment',
+		'ogg' => 'vorbiscomment',
 		'ape' => 'ape',
 		'wv' => 'ape',
-		'iso.wv' => 'ape',
 		'm4a' => 'quicktime',
 		'mp3' => ['id3v1', 'id3v2']
 	];
@@ -33,7 +41,7 @@ class TagSync
 	/**
 	 * @var array
 	 */
-	public $nonUtf8Encodings = ['CP1251', 'CP1252', 'ISO-8859-1', 'ISO-8859-2', 'UCS-2', 'UTF-16BE'];
+	public static $nonUtf8Encodings = ['CP1251', 'CP1252', 'ISO-8859-1', 'ISO-8859-2', 'UCS-2', 'UTF-16BE', 'UTF-16LE'];
 
 	/**
 	 * @var bool
@@ -56,6 +64,11 @@ class TagSync
 	protected $library = [];
 
 	/**
+	 * @var LibraryItem[][]
+	 */
+	protected $libraryIndex = [];
+
+	/**
 	 * @var array
 	 */
 	protected $brokenLibraryFiles = [];
@@ -71,7 +84,7 @@ class TagSync
 			if (extension_loaded(static::WIN_EXT)) {
 				$this->win = static::WIN_WRAPPER;
 			} else {
-				echo "php_wfio not loaded.";
+				echo "php_wfio not loaded.\n\n";
 				exit;
 			}
 		}
@@ -92,6 +105,8 @@ class TagSync
 		$this->destDir = !empty($args[1]) ? $args[1] : null;
 		$this->orphanDir = !empty($args['move-orphaned']) ? $args['move-orphaned'] : false;
 		$this->convertPaths = !empty($args['convert-paths']) ? (bool)$args['convert-paths'] : false;
+		$this->emulation = !empty($args['emulation']) ? (bool)$args['emulation'] : false;
+		$this->verbose = !empty($args['verbose']) ? (bool)$args['verbose'] : false;
 
 		if (!$this->srcDir || !$this->destDir || isset($args['help'])) {
 			$orphanDir = static::ORPHAN_DIR;
@@ -105,12 +120,17 @@ mtags source-directory destination-directory [options]
 Options:
 --no-relative           Always write absolute paths.
 --convert-paths         Convert existing paths, if they don't match the --no-relative option.
---move-orphaned[=path]  Move orphaned .tags to a separate directory ({$orphanDir} in a source directory by default)
---help                  Shows this info.
+--move-orphaned[=path]  Move orphaned .tags to a separate directory ({$orphanDir} in a source directory by default).
+--verbose               Show even more messages.
+--emulate               Don't do anything real.
+--help                  Show this info.
 
 TXT;
 			exit;
 		}
+
+		$this->origSrcDir = $this->srcDir;
+		$this->origDestDir = $this->destDir;
 
 		if ($this->isWindows) {
 			$this->srcDir = wfio_path2utf8($this->srcDir);
@@ -122,13 +142,13 @@ TXT;
 
 		if (!$this->destDir || !is_dir($this->win.$this->destDir)) {
 			if (!$this->mkdir($this->destDir, $this->dir_chmod, true)) {
-				echo "Failed to create the destination directory. Create it manually.\n";
+				echo "Failed to create the destination directory. Create it manually.\n\n";
 				exit;
 			}
 		}
 
 		if (!$this->srcDir || !is_dir($this->win.$this->srcDir)) {
-			echo "Source directory not found.\n";
+			echo "Source directory not found.\n\n";
 			exit;
 		}
 
@@ -138,7 +158,7 @@ TXT;
 
 		if ($this->orphanDir && is_string($this->orphanDir) && !is_dir($this->win.$this->orphanDir)) {
 			if (!$this->mkdir($this->orphanDir, $this->dir_chmod, true)) {
-				echo "Failed to create directory for orphaned tags ".$this->orphanDir.", please, create it manually.\n";
+				echo "Failed to create directory for orphaned tags ".$this->orphanDir.", please, create it manually.\n\n";
 				exit;
 			}
 		}
@@ -151,6 +171,64 @@ TXT;
 	}
 
 	/**
+	 * @param $dir
+	 * @param array $ext
+	 * @return array
+	 */
+	public function findFilesRecursively($dir, array $ext = [])
+	{
+		$matches = $media = [];
+
+		if ($this->isWindows) {
+			if ($ext) {
+				$ext = array_map(function ($ext) {
+					return '*.'.$ext;
+				}, $ext);
+				$ext = implode(' ', $ext);
+			} else {
+				$ext = '*.*';
+			}
+
+			$command = 'cmd /u /c chcp 65001>nul && where /t /f /r "'.$dir.'" '.$ext.' 2>nul';
+			$lines = shell_exec($command);
+
+			if ($lines !== null) {
+				$lines = trim($lines);
+				preg_match_all('#^\s*(\d+).+"(.+)\x5c(.+\.([^.]+))"\s*$#m', $lines, $matches, PREG_SET_ORDER);
+			}
+		} else {
+			if ($ext) {
+				$ext = array_map(function ($ext) {
+					return '-iname "*.'.$ext.'"';
+				}, $ext);
+				$ext = '\\( '.implode(' -o ', $ext).' \\)';
+			} else {
+				$ext = '';
+			}
+
+			$command = 'find "'.$dir.'" '.$ext.' -type f -printf "%s|%h|%f\n"';
+			$lines = shell_exec($command);
+
+			if ($lines !== null) {
+				$lines = trim($lines);
+				preg_match_all('#^(.+)\|(.+)\|(.+\.([^.]+))$#m', $lines, $matches, PREG_SET_ORDER);
+			}
+		}
+
+		foreach ($matches as $match) {
+			if (strcasecmp($match[4], 'cue') === 0) {
+				$media[$match[2]]['cues'][] = $match[3];
+			} else {
+				$media[$match[2]]['files'][] = $match[3];
+				$media[$match[2]]['info'][$match[3]] = [ctype_lower($match[4]) ? $match[4] : strtolower($match[4]), $match[1]];
+				$media[$match[2]]['sizes'][] = $match[1];
+			}
+		}
+
+		return $media;
+	}
+
+	/**
 	 * Syncs destination directory with source
 	 */
 	public function sync()
@@ -159,43 +237,27 @@ TXT;
 
 		echo "Indexing source files in ".$this->srcDir."\n\n";
 
-		$dirs = $this->scanDirectories($this->srcDir, false);
+		$ext = array_keys($this->mediaTypes);
+		$ext[] = 'cue';
 
-		if (!$dirs) {
-			echo "No source directories found.\n";
+		$mediaFiles = $this->findFilesRecursively($this->origSrcDir, $ext);
+
+		if (!$mediaFiles) {
+			echo "No media files found.\n";
 			return;
 		}
 
-		foreach ($dirs as list($dir, $files)) {
-			if (!$mediums = $this->analyzeDirectory($dir, $files)) {
-				echo "No candidates found in ".$dir.", skipping.\n\n";
+		foreach ($mediaFiles as $dir => $contents) {
+			if (!$mediums = $this->analyzeDirectory($dir, $contents)) {
+				echo "- No candidates found in ".$dir.", skipping.\n\n";
 				continue;
 			}
 
-			foreach ($mediums as $baseName => $medium) {
-				if (!$libraryId = $this->getDurationId($medium)) {
-					echo "- No durations, skipping:\n".$dir."\n\n";
-					continue;
-				}
-
-				if (isset($this->library[$libraryId]) && !in_array($libraryId, $this->brokenLibraryFiles)) {
-					$this->library[$libraryId]->exists = true;
-					continue;
-				}
-
-				if (isset($this->library[$libraryId])) {
-					$libraryItem = $this->library[$libraryId];
-					echo ". Found directory to fix file paths in:\n".$libraryItem->realPath."\n-> ".$dir."\n";
-					if ($this->library[$libraryId]->setPaths($medium) && $this->library[$libraryId]->save()) {
-						echo "+ Successfully saved.\n\n";
-					} else {
-						echo "- Hmm, nothing changed.\n\n";
-					}
-				} else {
-					$basePath = $baseName ? $dir.DS.$baseName : $dir;
-					echo ". New release to add:\n".$basePath."\n";
-					if ($libraryItem = $this->addToLibrary($libraryId, $basePath, $medium)) {
-						$this->library[$libraryId] = $libraryItem;
+			foreach ($mediums as $medium) {
+				if (!$medium->exists) {
+					echo "~ New release to add:\n".$medium->file."\n";
+					if ($this->addToLibrary($medium)) {
+						$this->library[$medium->file] = $medium;
 						echo "+ Successfully saved.\n\n";
 					}
 				}
@@ -203,13 +265,59 @@ TXT;
 		}
 
 		$index = 0;
-		foreach ($this->library as $id => $data) {
-			if (!$data->exists) {
+		foreach ($this->library as $file => $medium) {
+			if (!$medium->exists) {
 				if ($this->orphanDir) {
-					echo "* Files don't exist anymore, moving to ".$this->basename($this->orphanDir).":\n".$data->realPath."\n\n";
-					rename($this->win.$this->library[$id]->realPath, $this->win.$this->orphanDir.DS.date('Y-d-m H-i-ss').'-'.++$index.' '.$this->basename($this->library[$id]->realPath));
+					echo "* Files don't exist anymore, moving to ".$this->orphanDir.":\n".$file."\n\n";
+					rename($this->win.$file, $this->win.$this->orphanDir.DS.date('Y-d-m H-i-ss').'-'.++$index.' '.$this->basename($file));
 				} else {
-					echo "* Files don't exist anymore, can be safely removed:\n".$data->realPath."\n(Use the --move-orphaned parameter to move it automatically.)\n\n";
+					echo "* Files don't exist anymore, can be safely removed:\n".$file."\n(Use the --move-orphaned parameter to move it automatically.)\n\n";
+				}
+			}
+		}
+	}
+
+	protected function loadLibrary()
+	{
+		$files = $this->isWindows
+			? 'cmd /u /c chcp 65001>nul && dir "'.$this->destDir.DS.'*.'.static::EXT.'" /B /S 2>nul'
+			: 'find "'.$this->destDir.'" -type f -iname "*.'.static::EXT.'"';
+
+		$files = shell_exec($files);
+
+		if ($files === null) {
+			echo "Unable to load the library\n\n";
+			return;
+		}
+
+		if (mb_strpos($files, $this->destDir) === false) {
+			return;
+		}
+
+		$this->library = [];
+		$files = explode("\n", trim($files));
+
+		foreach ($files as $file) {
+			if (!$item = $this->loadLibraryItem($file)) {
+				echo "- Empty or corrupted file, skipping:\n".$file."\n\n";
+				continue;
+			}
+
+			foreach ($item->tags as $tag) {
+				if (isset($tag[static::PATH_KEY])) {
+					$i = mb_substr($tag[static::PATH_KEY], 0, 1);
+					if ($i !== '/' && $i !== '.') {
+						continue 2;
+					}
+				}
+			}
+
+			$this->library[$file] = $item;
+
+			foreach ($item->getIdKeys() as $key) {
+				$id = $item->getIndexId($key);
+				if ($id && !isset($this->libraryIndex[$key][$id])) {
+					$this->libraryIndex[$key][$id] = $item;
 				}
 			}
 		}
@@ -222,64 +330,24 @@ TXT;
 	{
 		echo "Indexing the library in ".$this->destDir."\n\n";
 
-		$this->brokenLibraryFiles = [];
-		$files = $this->scanDirectories($this->destDir, true);
+		$this->loadLibrary();
 
-		foreach ($files as list($dir, $file)) {
-			$fullPath = $dir.DS.$file;
+		foreach ($this->library as $file => $medium) {
+			foreach ($medium->tags as $tag) {
+				$srcFile = empty($tag[static::PATH_KEY]) ? false : explode('|', $tag[static::PATH_KEY])[0];
+				$absPath = $srcFile && $this->isAbsolutePath($srcFile);
+				$exists = $srcFile && $this->truepath($srcFile, $this->dirname($file));
+				$convertPaths = $exists && $this->convertPaths && (($absPath && $this->relativePaths) || (!$absPath && !$this->relativePaths));
 
-			if (!$json = $this->parseMTags($fullPath)) {
-				echo "- Broken or empty file, skipping:\n".$fullPath."\n\n";
-				continue;
-			}
-
-			if (!$libraryId = $this->getDurationId($json)) {
-				echo "- No durations, skipping:\n".$fullPath."\n\n";
-				continue;
-			}
-
-			if (isset($this->library[$libraryId])) {
-				echo "- Possible duplicate, skipping:\n".$fullPath."\n\n";
-				continue;
-			}
-
-			$this->library[$libraryId] = new LibraryItem($this, $libraryId, $fullPath, $json);
-
-			$brokenFile = false;
-			$needsConverting = false;
-
-			for ($i = 0, $l = count($json); $i < $l; $i++) {
-				$f = $json[$i];
-
-				if (empty($f[static::PATH_KEY])) {
-					echo ". No path, preparing to fix:\n".$fullPath."|".$i."\n\n";
-					if (!in_array($libraryId, $this->brokenLibraryFiles)) {
-						$this->brokenLibraryFiles[] = $libraryId;
-					}
-				} else {
-					$realSrcFile = $f[static::PATH_KEY];
-					$absPath = substr($realSrcFile, 0, 1) === '/';
-					$realSrcFile = explode('|', $realSrcFile)[0];
-					$realSrcFile = $absPath ? substr($realSrcFile, 1) : $dir.'/'.$realSrcFile;
-
-					if (!$realpath = $this->truepath($realSrcFile)) {
-						if (!$brokenFile) {
-							echo ". Broken paths, preparing to fix:\n".$fullPath."\n";
-							$this->brokenLibraryFiles[] = $libraryId;
-							$brokenFile = true;
-						}
-					} else if ($this->convertPaths && (($absPath && $this->relativePaths) || (!$absPath && !$this->relativePaths))) {
-						if (!$needsConverting) {
-							echo ". Paths to be converted in:\n".$fullPath."\n";
-							$this->brokenLibraryFiles[] = $libraryId;
-							$needsConverting = true;
-						}
-					}
+				if (!$srcFile || !$exists || $convertPaths) {
+					$medium->broken = true;
+					break;
 				}
 			}
-
-			if ($brokenFile || $needsConverting) {
-				echo "\n";
+			if ($medium->broken) {
+				echo "~ Invalid paths, preparing to fix:\n".$file."\n\n";
+			} else {
+				$medium->exists = true;
 			}
 		}
 	}
@@ -287,33 +355,50 @@ TXT;
 	/**
 	 * Produces m-TAGS compatible snapshot of a directory
 	 *
-	 * @param $dir
-	 * @param array $files
-	 * @return array
+	 * @param string $dir
+	 * @param array $contents
+	 * @return LibraryItem[]
 	 */
-	protected function analyzeDirectory($dir, array $files = [])
+	protected function analyzeDirectory($dir, array $contents = [])
 	{
-		$cueFiles = $fileTags = [];
+		if ($item = $this->getItemById(static::SIZE_KEY, $contents['sizes'], $dir, $contents['files'])) {
+			if ($this->verbose) {
+				echo "Matched by file sizes:\n".$dir."\n\n";
+			}
 
-		foreach ($files as $file) {
-			$ext = $this->ext($file);
+			return [$item];
+		}
 
-			if ($ext === 'cue') {
-				$contents = $this->utf8(file_get_contents($this->win.$dir.DS.$file));
-				$refFiles = preg_match_all('/^\s*FILE\s+[\'"]?([^\'"]+)[\'"]?/m', $contents, $matches);
-				if ($refFiles === 1 && !isset($cueFiles[$matches[1][0]]) && file_exists($this->win.$dir.DS.$matches[1][0])) {
-					$cueFiles[$matches[1][0]] = [$file, $contents];
+		$contents['tags'] = $contents['data'] = $contents['durations'] = [];
+
+		$cueFiles = [];
+		if (isset($contents['cues'])) {
+			foreach ($contents['cues'] as $cueFile) {
+				$cueContent = static::utf8(file_get_contents($this->win.$dir.DS.$cueFile));
+				$refFiles = preg_match_all('/^\s*FILE\s+[\'"]?([^\'"]+)[\'"]?/m', $cueContent, $matches);
+				if ($refFiles === 1 && !isset($cueFiles[$matches[1][0]]) && isset($contents['info'][$matches[1][0]])) {
+					$cueFiles[$matches[1][0]] = [$cueFile, $cueContent];
 				}
-			} else if (isset($this->mediaTypes[$ext])) {
+			}
+		}
 
-				$data = $this->id3->analyze($dir.DS.$file);
+		foreach ($contents['info'] as $file => list($ext, $size)) {
+			$data = $this->id3->analyze($dir.DS.$file, $size);
 
-				if (!isset($data['playtime_seconds']) && $ext !== 'iso.wv') {
-					echo "Failed to calculate duration of ".$file.", skipping.\n";
-					continue;
+			if (!$data || isset($data['error'])) {
+				echo "getID3 error:\n".$file."\n";
+				if (!empty($data['error'])) {
+					echo implode("\n", $data['error']);
 				}
+				echo "\n";
+				$contents['data'][$file] = $contents['tags'][$file] = [];
+			} else {
+				$contents['durations'][$file] = $data['playtime_seconds'] = !empty($data['playtime_seconds'])
+					? $this->formatDuration($data['playtime_seconds'])
+					: null;
 
 				$tags = [];
+
 				foreach ((array)$this->mediaTypes[$ext] as $tagType) {
 					if (!empty($data['tags'][$tagType])) {
 						$tags = $this->flattenTags($data['tags'][$tagType]);
@@ -321,82 +406,189 @@ TXT;
 					}
 				}
 
-				if (!empty($tags['CUESHEET'])) {
-					// Overwrites .cue reference
-					$cueFiles[$file] = [null, $this->utf8($tags['CUESHEET'])];
+				if ($tags) {
+					if (!empty($tags['CUESHEET'])) {
+						// Overwrites .cue reference
+						$cueFiles[$file] = [null, static::utf8($tags['CUESHEET'])];
+					}
+
+					$tags = $this->fixMapping($ext, $tags);
 				}
 
-				$tags = $this->fixMapping($ext, $tags);
+				$contents['tags'][$file] = $tags;
 
-				$fileTags[$file] = [
-					'playtime_seconds' => isset($data['playtime_seconds']) ? $data['playtime_seconds'] : null,
-					'tags' => $tags
-				];
+				if (!isset($cueFiles[$file])) {
+					$contents['data'][$file] = $data;
+				}
 			}
 		}
 
 		$mediums = [];
+		$fileNum = count($contents['data']);
 
-		foreach ($fileTags as $file => $data) {
-			if (isset($cueFiles[$file])) {
+		if ($fileNum) {
+			$md5ids = array_filter(array_column($contents['data'], 'md5_data_source'));
+			if ($md5ids && count($md5ids) === $fileNum && $item = $this->getItemById(static::MD5_KEY, $md5ids, $dir, $contents['files'])) {
+				if ($this->verbose) {
+					echo "Matched by md5 hashes:\n".$dir."\n\n";
+				}
 
-				$cueFile = $cueFiles[$file][0];
-				$cueData = (new getid3_cue($this->id3))->readCueSheet($cueFiles[$file][1]);
-				$cueTags = !empty($cueData['comments']) ? $this->flattenTags($cueData['comments']) : [];
+				return [$item];
+			}
 
-				if (!empty($cueData['tracks'])) {
-					$tracks = [];
+			$durations = array_filter(array_column($contents['data'], 'playtime_seconds'));
+			if ($durations && count($durations) === $fileNum && $item = $this->getItemById(static::DURATION_KEY, $durations, $dir, $contents['files'])) {
+				if ($this->verbose) {
+					echo "Matched by duration:\n".$dir."\n\n";
+				}
 
-					foreach ($cueData['tracks'] as $num => $track) {
-						$trackEntry = [];
+				return [$item];
+			}
 
-						if (!empty($track['performer'])) {
-							$trackEntry['ARTIST'] = $track['performer'];
-						}
-						if (!empty($track['track_number'])) {
-							$trackEntry['TRACKNUMBER'] = $track['track_number'];
-						}
-						if (!empty($track['title'])) {
-							$trackEntry['TITLE'] = $track['title'];
-						}
+			$tracks = [];
+			foreach ($contents['data'] as $file => $data) {
+				$track = [
+					static::PATH_KEY => ($this->isWindows ? '/' : '').str_replace(DS, '/', $dir).'/'.$file
+				];
 
-						$trackEntry = array_merge($cueTags, $data['tags'], $trackEntry);
+				if (!empty($contents['info'][$file][1])) {
+					$track[static::SIZE_KEY] = $contents['info'][$file][1];
+				}
 
-						unset($trackEntry['CUESHEET']);
+				if (!empty($data['playtime_seconds'])) {
+					$track[static::DURATION_KEY] = $data['playtime_seconds'];
+				}
 
-						$entry = [
-							static::PATH_KEY => ($this->isWindows ? '/' : '').str_replace(DS, '/', $dir).'/'.($cueFile ?: $file).'|'.($num + 1)
-						];
+				if (!empty($data['md5_data_source'])) {
+					$track[static::MD5_KEY] = $data['md5_data_source'];
+				}
 
-						if ($duration = $this->getCueTrackDuration($data['playtime_seconds'], $cueData['tracks'], $num)) {
-							$entry[static::DURATION_KEY] = $duration;
-						}
+				$track += $contents['tags'][$file];
+				$tracks[] = $track;
+			}
 
-						$entry += $trackEntry;
+			$mediums[] = new LibraryItem($this, $tracks, $dir);
+		}
 
-						$tracks[] = $entry;
+		foreach ($cueFiles as $file => list($cueFile, $cueContent)) {
+
+			$cueData = (new getid3_cue($this->id3))->readCueSheet($cueFiles[$file][1]);
+
+			if (empty($cueData['tracks'])) {
+				continue;
+			}
+
+			$cueTags = !empty($cueData['comments']) ? $this->flattenTags($cueData['comments']) : [];
+
+			$tracks = $basenames = [];
+
+			foreach ($cueData['tracks'] as $num => $track) {
+				$basenames[] = $basename = ($cueFile ?: $file).'|'.($num + 1);
+
+				$cueTrack = [
+						static::PATH_KEY => ($this->isWindows ? '/' : '').str_replace(DS, '/', $dir).'/'.$basename
+					] + array_merge($cueTags, $contents['tags'][$file], $this->getCueTrackTags($track));
+
+				$cueTrack = $this->fixMapping('cue', $cueTrack);
+
+				if ($indexKey = $this->getIndexKey($track, $num)) {
+					$cueTrack[static::INDEX_KEY] = $indexKey;
+				}
+
+				if ($duration = $this->getCueTrackDuration($contents['durations'][$file], $cueData['tracks'], $num)) {
+					$cueTrack[static::DURATION_KEY] = $duration;
+				}
+
+				$tracks[] = $cueTrack;
+			}
+
+			$trackNum = count($cueData['tracks']);
+			$found = false;
+
+			foreach ([static::INDEX_KEY, static::DURATION_KEY] as $key) {
+				$id = array_column($tracks, $key);
+				if ($id && count($id) === $trackNum && $item = $this->getItemById($key, $id, $dir, $basenames)) {
+					if ($this->verbose) {
+						$crit = $key === static::INDEX_KEY ? 'TOC' : 'duration';
+						echo "Cue sheet matched by ".$crit.":\n".$dir.DS.($cueFile ?: $file)."\n\n";
 					}
 
-					$key = count($cueFiles) > 1 ? ($cueFile ?: $file) : null;
-					$key ? $mediums[$key] = $tracks : $mediums[] = $tracks;
-				} else {
-					continue;
+					$mediums[] = $item;
+					$found = true;
+					break;
 				}
+			}
 
-
-			} else {
-				if (!$mediums) {
-					$mediums[0] = [];
-				}
-
-				$mediums[0][] = [
-						static::PATH_KEY => ($this->isWindows ? '/' : '').str_replace(DS, '/', $dir).'/'.$file,
-						static::DURATION_KEY => $this->formatDuration($data['playtime_seconds'])
-					] + $data['tags'];
+			if (!$found) {
+				$tagsPath = count($cueFiles) > 1 ? $dir.DS.($cueFile ?: $file) : $dir;
+				$mediums[] = new LibraryItem($this, $tracks, $tagsPath);
 			}
 		}
 
 		return $mediums;
+	}
+
+	/**
+	 * Adds a directory/.cue/file with CUESHEET tag to library
+	 *
+	 * @param LibraryItem $item
+	 * @return LibraryItem|bool
+	 */
+	protected function addToLibrary(LibraryItem $item)
+	{
+		if (!$item->file) {
+			echo "Unable to add a medium without file path\n\n";
+			return false;
+		}
+
+		if (mb_strpos($item->file, $this->srcDir) === 0) {
+			$relPath = mb_substr($item->file, mb_strlen($this->srcDir) + 1);
+
+			if (!$relPath) {
+				$relPath = $this->basename($this->srcDir).'.'.static::EXT;
+			}
+
+			$item->file = $this->destDir.DS.$relPath;
+		}
+
+		return $item->save() ? $item : false;
+	}
+
+	/**
+	 * @param $key
+	 * @param array $values
+	 * @param $dir
+	 * @param $files
+	 * @return LibraryItem|null
+	 */
+	protected function getItemById($key, array $values, $dir, $files)
+	{
+		if (!$values || !isset($this->libraryIndex[$key])) {
+			return null;
+		}
+
+		$index = $this->libraryIndex[$key];
+		$valuesIndex = array_combine($files, $values);
+
+		sort($values);
+		$id = md5(implode('|', $values));
+
+		if ($id && isset($index[$id])) {
+			$item = $index[$id];
+
+			if ($item->broken) {
+				if ($item->setPaths($key, $dir, $valuesIndex) && $item->save()) {
+					echo "+ Successfully saved.\n\n";
+				} else {
+					echo "- Hmm, nothing changed.\n\n";
+				}
+			}
+
+			$item->exists = true;
+			return $item;
+		}
+
+		return null;
 	}
 
 	/**
@@ -406,6 +598,10 @@ TXT;
 	 */
 	protected function fixMapping($ext, array $tags)
 	{
+		if ($ext === 'cue') {
+			unset($tags['CUESHEET']);
+		}
+
 		if (!empty($tags['ALBUM_ARTIST'])) {
 			$tags['ALBUM ARTIST'] = $tags['ALBUM_ARTIST'];
 			unset($tags['ALBUM_ARTIST']);
@@ -448,31 +644,24 @@ TXT;
 		return $tags;
 	}
 
-	/**
-	 * Adds a directory/.cue/file with CUESHEET tag to library
-	 *
-	 * @param string $libraryId
-	 * @param string $path
-	 * @param array $tags
-	 * @return bool|LibraryItem
-	 */
-	protected function addToLibrary($libraryId, $path, array $tags)
+	protected function getCueTrackTags($track)
 	{
-		$relPath = mb_substr($path, mb_strlen($this->srcDir) + 1);
+		$tags = [];
 
-		if (!$relPath) {
-			$relPath = $this->basename($this->srcDir);
+		if (!empty($track['performer'])) {
+			$tags['ARTIST'] = $track['performer'];
+		}
+		if (!empty($track['track_number'])) {
+			$tags['TRACKNUMBER'] = $track['track_number'];
+		}
+		if (!empty($track['title'])) {
+			$tags['TITLE'] = $track['title'];
+		}
+		if (isset($track['isrc']) && trim($track['isrc'], '0')) {
+			$tags['ISRC'] = $track['isrc'];
 		}
 
-		$tagFile = $this->destDir.DS.$relPath.'.'.static::EXT;
-
-		$libraryItem = new LibraryItem($this, $libraryId, $tagFile, $tags);
-
-		if ($libraryItem->save()) {
-			return $libraryItem;
-		} else {
-			return false;
-		}
+		return $tags;
 	}
 
 	/**
@@ -483,7 +672,7 @@ TXT;
 	 */
 	protected function getCueTrackDuration($seconds, array $tracks, $num)
 	{
-		if (empty($tracks[$num]['index'][1])) {
+		if (!$seconds || empty($tracks[$num]['index'][1])) {
 			return '';
 		}
 
@@ -494,18 +683,32 @@ TXT;
 		} else if (isset($tracks[$num + 1]['index'][1])) {
 			$endFrame = $this->countFrames($tracks[$num + 1]['index'][1]);
 		} else {
-			if (isset($seconds)) {
-				$endFrame = ceil($seconds * 75);
-			} else {
-				// Dirty hack for iso.wv
-				$endFrame = $startFrame + 75 * 180;
-			}
+			$endFrame = ceil($seconds * 75);
 		}
 
 		$duration = $endFrame - $startFrame;
 		$duration = $this->formatDuration($duration / 75);
 
 		return $duration;
+	}
+
+	protected function getIndexKey($track, $num)
+	{
+		$key = [];
+
+		if ($num !== 0 && !trim(implode('', $track['index'][1]), '0')) {
+			return $key;
+		}
+
+		if (isset($track['index'][0])) {
+			$key[] = implode(':', $track['index'][0]);
+		}
+
+		if (isset($track['index'][1])) {
+			$key[] = implode(':', $track['index'][1]);
+		}
+
+		return implode(';', $key);
 	}
 
 	/**
@@ -564,7 +767,8 @@ TXT;
 		unset($tags['PICTURE']);
 
 		array_walk_recursive($tags, function (&$tag) {
-			$tag = $this->utf8(trim(trim($tag), '"'));
+			$tag = trim(trim($tag), '"');
+			$tag = static::utf8($tag);
 		});
 
 		return $tags;
@@ -572,9 +776,9 @@ TXT;
 
 	/**
 	 * @param string $file Full file path
-	 * @return array|bool
+	 * @return LibraryItem
 	 */
-	protected function parseMTags($file)
+	protected function loadLibraryItem($file)
 	{
 		$json = file_get_contents($this->win.$file, FILE_TEXT);
 
@@ -588,25 +792,11 @@ TXT;
 
 		$json = json_decode($json, true);
 
-		return is_array($json) ? $json : false;
-	}
+		if (!is_array($json)) {
+			return false;
+		}
 
-	/**
-	 * @param array $data
-	 * @return null|string
-	 */
-	protected function getDurationId(array $data)
-	{
-		$keys = array_reduce($data, function ($result, $array) {
-			if (isset($array[static::DURATION_KEY]) && $array[static::DURATION_KEY]) {
-				$result[] = substr($array[static::DURATION_KEY], 0, -1);
-			} else if (isset($array[static::PATH_KEY])) {
-				echo "No duration found for ".$array[static::PATH_KEY]."\n";
-			}
-			return $result;
-		}, []);
-
-		return implode('|', $keys);
+		return new LibraryItem($this, $json, $file);
 	}
 
 	/**
@@ -670,45 +860,6 @@ TXT;
 	}
 
 	/**
-	 * Recursively walks through directory tree and collects directories or .tags files
-	 *
-	 * @param string $rootDir
-	 * @param bool $findTags
-	 * @param array $result
-	 * @return array
-	 */
-	protected function scanDirectories($rootDir, $findTags = false, $result = [])
-	{
-		if (!file_exists($this->win.$rootDir)) {
-			echo "Directory not found: ".$rootDir."\n";
-			return [];
-		}
-
-		$contents = scandir($this->win.$rootDir);
-		$contents = array_diff($contents, ['..', '.']);
-		$dirAdded = false;
-
-		foreach ($contents as $file) {
-			if (is_dir($this->win.$rootDir.DS.$file)) {
-				$result = $this->scanDirectories($rootDir.DS.$file, $findTags, $result);
-			} else {
-				$ext = $this->ext($file);
-
-				if ($findTags) {
-					if ($ext === static::EXT) {
-						$result[] = [$rootDir, $file];
-					}
-				} else if (!$dirAdded && isset($this->mediaTypes[$ext])) {
-					$result[] = [$rootDir, $contents];
-					$dirAdded = true;
-				}
-			}
-		}
-
-		return $result;
-	}
-
-	/**
 	 * Unicode-safe basename()
 	 *
 	 * @param string $path
@@ -719,6 +870,7 @@ TXT;
 		$path = preg_replace('/\\\\/', '/', $path);
 		$path = rtrim($path, '/');
 		$path = explode('/', $path);
+
 		return end($path);
 	}
 
@@ -742,24 +894,6 @@ TXT;
 	}
 
 	/**
-	 * Extracts extension from unicode file name
-	 *
-	 * @param string $path
-	 * @return string
-	 */
-	public function ext($path)
-	{
-		$ext = explode('.', $path);
-		$ext = end($ext);
-
-		if ($ext === 'wv' && mb_substr($path, -7) === '.iso.wv') {
-			return 'iso.wv';
-		}
-
-		return $ext;
-	}
-
-	/**
 	 * @param $string
 	 * @param null $charlist
 	 * @return mixed|string
@@ -770,6 +904,7 @@ TXT;
 			return trim($string);
 		} else {
 			$charlist = str_replace('/', "\/", preg_quote($charlist));
+			// preg_replace('/^[\pZ\pC]+|[\pZ\pC]+$/u', '', $string);
 			return preg_replace("/(^[$charlist]+)|([$charlist]+$)/us", '', $string);
 		}
 	}
@@ -785,23 +920,22 @@ TXT;
 
 	/**
 	 * @param $path
+	 * @param null $cwd
 	 * @return bool|string
 	 */
-	public function truepath($path)
+	public function truepath($path, $cwd = null)
 	{
-		if (!$this->isWindows) {
-			return realpath($path);
-		}
+		$cwd = $cwd ?: ($this->isWindows ? wfio_getcwd8() : getcwd());
+		$ds = strpos($cwd, '/') === false ? '\\' : '/';
 
 		// attempts to detect if path is relative in which case, add cwd
 		if (!$this->isAbsolutePath($path)) {
-			$path = wfio_getcwd8().DS.$path;
+			$path = $cwd.$ds.$path;
 		}
 
-		// resolve path parts (single dot, double dot and double delimiters)
-		$path = str_replace(['/', '\\'], DS, $path);
-		$path = preg_replace('/['.preg_quote(DS).']+/u', DS, $path);
-		$parts = mb_split('['.preg_quote(DS).']', $path);
+		$path = preg_replace('#[/\\\\]+#', $ds, $path);
+		$path = ltrim($path, $ds);
+		$parts = explode($ds, $path);
 
 		$absolutes = [];
 		foreach ($parts as $part) {
@@ -813,10 +947,10 @@ TXT;
 			}
 		}
 
-		$path = implode(DS, $absolutes);
+		$path = implode($ds, $absolutes);
 
-		if (mb_strpos($path, ':') === false) {
-			$path = mb_substr(wfio_getcwd8(), 0, 3).$path;
+		if ($ds === '/') {
+			$path = '/'.$path;
 		}
 
 		return file_exists($this->win.$path) ? $path : false;
@@ -828,7 +962,7 @@ TXT;
 	 */
 	public function isAbsolutePath($path)
 	{
-		return $this->isWindows ? mb_substr($path, 1, 1) === ':' : mb_substr($path, 0, 1) === '/';
+		return mb_substr($path, 1, 1) === ':' || mb_substr($path, 0, 1) === '/';
 	}
 
 	/**
@@ -842,6 +976,10 @@ TXT;
 	 */
 	public function mkdir($path, $chmod = 0755, $recursive = true)
 	{
+		if ($this->emulation) {
+			return true;
+		}
+
 		$path = str_replace(['\\', '/'], DS, $path);
 
 		if (!$recursive) {
@@ -873,13 +1011,13 @@ TXT;
 	 * @param $str
 	 * @return bool|string
 	 */
-	public function utf8($str)
+	public static function utf8($str)
 	{
 		if (mb_check_encoding($str, 'UTF-8')) {
 			return $str;
 		}
 
-		foreach ($this->nonUtf8Encodings as $enc) {
+		foreach (static::$nonUtf8Encodings as $enc) {
 			if (mb_check_encoding($str, $enc)) {
 				return mb_convert_encoding($str, 'UTF-8', $enc);
 			}
