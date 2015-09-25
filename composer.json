@@ -1,0 +1,20 @@
+{
+    "name": "vensko/mtags-sync",
+    "description": "CLI tool to keep m-TAGS library up to date",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Dzmitry Vensko",
+            "email": "github@vensko.net"
+        }
+    ],
+    "autoload": {
+        "psr-4": { "TagSync\\" : "src/" },
+        "classmap": ["vendor/james-heinrich/getid3/getid3/module.misc.cue.php"]
+    },
+    "require": {
+        "php": ">=5.6",
+        "james-heinrich/getid3": "dev-master",
+        "pwfisher/command-line-php": "dev-master"
+    }
+}

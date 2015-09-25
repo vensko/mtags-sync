@@ -1,11 +1,15 @@
 <?php
 
+namespace TagSync;
+
+use CommandLine, getid3_cue;
+
 /**
  * Class TagSync
  */
 class TagSync
 {
-	const VERSION = '0.1a';
+	const VERSION = '0.2a';
 	const EXT = 'tags';
 	const WIN_EXT = 'wfio';
 	const WIN_WRAPPER = 'wfio://';
@@ -30,12 +34,12 @@ class TagSync
 	 * @var array
 	 */
 	public $mediaTypes = [
-		'flac' => 'vorbiscomment',
-		'ogg' => 'vorbiscomment',
+		'flac' => 'flac',
+		'ogg' => 'ogg',
 		'ape' => 'ape',
 		'wv' => 'ape',
 		'm4a' => 'quicktime',
-		'mp3' => ['id3v1', 'id3v2']
+		'mp3' => ['id3v2','id3v1']
 	];
 
 	/**
@@ -92,6 +96,11 @@ class TagSync
 		getID3::$mtags = $this;
 
 		$this->id3 = new getID3();
+		$this->id3->option_tag_lyrics3 = false;
+		$this->id3->option_tags_html = false;
+		$this->id3->option_tags_process = false;
+		$this->id3->option_save_attachments = false;
+		$this->id3->option_extra_info = false;
 	}
 
 	/**
@@ -255,10 +264,12 @@ TXT;
 
 			foreach ($mediums as $medium) {
 				if (!$medium->exists) {
-					echo "~ New release to add:\n".$medium->file."\n";
+					echo "+ ".$medium->file."\n";
 					if ($this->addToLibrary($medium)) {
 						$this->library[$medium->file] = $medium;
-						echo "+ Successfully saved.\n\n";
+						if ($this->verbose) {
+							echo "+ Successfully saved.\n\n";
+						}
 					}
 				}
 			}
@@ -312,6 +323,10 @@ TXT;
 				}
 			}
 
+			if ($this->verbose) {
+				echo $item->file."\n";
+			}
+
 			$this->library[$file] = $item;
 
 			foreach ($item->getIdKeys() as $key) {
@@ -328,7 +343,7 @@ TXT;
 	 */
 	protected function indexLibrary()
 	{
-		echo "Indexing the library in ".$this->destDir."\n\n";
+		echo "Indexing library in ".$this->destDir."\n\n";
 
 		$this->loadLibrary();
 
@@ -361,6 +376,10 @@ TXT;
 	 */
 	protected function analyzeDirectory($dir, array $contents = [])
 	{
+		if (!isset($contents['sizes'])) {
+			return [];
+		}
+
 		if ($item = $this->getItemById(static::SIZE_KEY, $contents['sizes'], $dir, $contents['files'])) {
 			if ($this->verbose) {
 				echo "Matched by file sizes:\n".$dir."\n\n";
@@ -400,8 +419,9 @@ TXT;
 				$tags = [];
 
 				foreach ((array)$this->mediaTypes[$ext] as $tagType) {
-					if (!empty($data['tags'][$tagType])) {
-						$tags = $this->flattenTags($data['tags'][$tagType]);
+					if (!empty($data[$tagType]['comments'])) {
+						$encoding = isset($data[$tagType]['encoding']) ? $data[$tagType]['encoding'] : null;
+						$tags = $this->flattenTags($data[$tagType]['comments'], $encoding);
 						break;
 					}
 				}
@@ -544,7 +564,7 @@ TXT;
 		if (mb_strpos($item->file, $this->srcDir) === 0) {
 			$relPath = mb_substr($item->file, mb_strlen($this->srcDir) + 1);
 
-			if (!$relPath) {
+			if (mb_strlen($relPath) <= strlen(static::EXT)) {
 				$relPath = $this->basename($this->srcDir).'.'.static::EXT;
 			}
 
@@ -607,6 +627,11 @@ TXT;
 			unset($tags['ALBUM_ARTIST']);
 		}
 
+		if (!empty($tags['ALBUMARTIST'])) {
+			$tags['ALBUM ARTIST'] = $tags['ALBUMARTIST'];
+			unset($tags['ALBUMARTIST']);
+		}
+
 		if (!empty($tags['TRACK_NUMBER'])) {
 			$tags['TRACKNUMBER'] = $tags['TRACK_NUMBER'];
 			unset($tags['TRACK_NUMBER']);
@@ -639,6 +664,18 @@ TXT;
 			$genre = !empty($tags['GENRE']) ? (array)$tags['GENRE'] : [];
 			$tags['GENRE'] = array_unique(array_merge($genre, (array)$tags['STYLE']));
 			unset($tags['STYLE']);
+		}
+
+		if (isset($tags['TRACKNUMBER'])) {
+			$track = str_pad($tags['TRACKNUMBER'], 2, '0', STR_PAD_LEFT);
+			if (isset($tags['CUE_TRACK'.$track.'_LYRICS'])) {
+				$tags['LYRICS'] = $tags['CUE_TRACK'.$track.'_LYRICS'];
+				foreach (array_keys($tags) as $key) {
+					if (strpos($key, '_LYRICS', 7) !== false) {
+						unset($tags[$key]);
+					}
+				}
+			}
 		}
 
 		return $tags;
@@ -745,16 +782,17 @@ TXT;
 
 	/**
 	 * @param array $tags
+	 * @param null $encoding
 	 * @return array
 	 */
-	protected function flattenTags(array $tags = [])
+	protected function flattenTags(array $tags = [], $encoding = null)
 	{
 		$tags = array_map(function ($tag) {
-			$tag = array_filter($tag, [$this, 'isNotEmptyString']);
+			$tag = array_filter($tag, [$this, 'isInfoTag']);
 			return $tag ? (count($tag) === 1 ? reset($tag) : $tag) : '';
 		}, $tags);
 
-		$tags = array_filter($tags, [$this, 'isNotEmptyString']);
+		$tags = array_filter($tags, [$this, 'isInfoTag']);
 		$tags = array_change_key_case($tags, CASE_UPPER);
 
 		foreach ($tags as $key => $tag) {
@@ -766,9 +804,11 @@ TXT;
 
 		unset($tags['PICTURE']);
 
-		array_walk_recursive($tags, function (&$tag) {
+		array_walk_recursive($tags, function (&$tag) use ($encoding) {
 			$tag = trim(trim($tag), '"');
-			$tag = static::utf8($tag);
+			if ($encoding !== 'UTF-8' || !mb_check_encoding($tag, 'UTF-8')) {
+				$tag = static::utf8($tag);
+			}
 		});
 
 		return $tags;
@@ -894,28 +934,12 @@ TXT;
 	}
 
 	/**
-	 * @param $string
-	 * @param null $charlist
-	 * @return mixed|string
-	 */
-	public function mb_trim($string, $charlist = null)
-	{
-		if (is_null($charlist)) {
-			return trim($string);
-		} else {
-			$charlist = str_replace('/', "\/", preg_quote($charlist));
-			// preg_replace('/^[\pZ\pC]+|[\pZ\pC]+$/u', '', $string);
-			return preg_replace("/(^[$charlist]+)|([$charlist]+$)/us", '', $string);
-		}
-	}
-
-	/**
 	 * @param string $str
 	 * @return bool
 	 */
-	public function isNotEmptyString($str)
+	public function isInfoTag($str)
 	{
-		return $str !== '';
+		return $str !== '' && !isset($str['data']);
 	}
 
 	/**

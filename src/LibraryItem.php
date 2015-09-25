@@ -1,5 +1,7 @@
 <?php
 
+namespace TagSync;
+
 /**
  * Class LibraryItem
  */
