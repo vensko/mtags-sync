@@ -6,21 +6,26 @@ NOT ready for usage yet!
 # Usage
 Windows:
 ```
-mtags.bat source-directory destination-directory [options]
+mtags.bat info media-file [options]
+mtags.bat sync source-directory destination-directory [options]
 ```
 Linux:
 ```
-php mtags.phar source-directory destination-directory [options]
+php mtags.phar info media-file [options]
+php mtags.phar sync source-directory destination-directory [options]
 ```
 Options:
 ```
+--verbose               Show even more messages.
+--colored               Colored output.
+--emulate               Don't do anything real.
+--help                  Show this info.
+```
+Sync options:
+```
 --no-relative           Always write absolute paths.
 --convert-paths         Convert existing paths, if they don't match the --no-relative option.
---move-orphaned[=path]  Move orphaned .tags to a [path]
---colored               Colored output.  
---verbose               Show even more messages.
---emulate               Don't do anything real.
---help                  Shows this info.
+--move-orphaned[=path]  Move orphaned .tags to a separate directory.
 ```
 
 # Third-party components

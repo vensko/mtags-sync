@@ -107,7 +107,7 @@ class LibraryItem
 					$this->sync->log("- [EMPTY]", TagSync::LOG_WARNING, null, "\n", TagSync::CONSOLE_WHITE);
 				}
 
-				$this->tags[$k][TagSync::PATH_KEY] = ($this->sync->isWindows ? '/' : '').str_replace(DS, '/', $dir).'/'.$file;
+				$this->tags[$k][TagSync::PATH_KEY] = ($this->sync->isWindows ? '/' : '').str_replace(DIRECTORY_SEPARATOR, '/', $dir).'/'.$file;
 
 				$this->sync->log("+ ".$this->tags[$k][TagSync::PATH_KEY], TagSync::LOG_WARNING, null, "\n\n", TagSync::CONSOLE_WHITE);
 
@@ -172,7 +172,7 @@ class LibraryItem
 					$this->tags[$i][$k] = ltrim($this->tags[$i][$k], '/');
 				}
 				$this->tags[$i][$k] = $this->sync->findRelativePath($this->sync->dirname($file), $this->tags[$i][$k]);
-				$this->tags[$i][$k] = str_replace(DS, '/', $this->tags[$i][$k]);
+				$this->tags[$i][$k] = str_replace(DIRECTORY_SEPARATOR, '/', $this->tags[$i][$k]);
 			}
 		}
 

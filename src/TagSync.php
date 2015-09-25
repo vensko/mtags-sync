@@ -4,6 +4,10 @@ namespace TagSync;
 
 use CommandLine, getid3_cue;
 
+if (!defined('DS')) {
+	define('DS', DIRECTORY_SEPARATOR);
+}
+
 /**
  * Class TagSync
  */
@@ -30,6 +34,15 @@ class TagSync
 	public $colored = false;
 	public $emulation = false;
 	public $verbose = null;
+
+	public $args = [];
+
+	public $currentTask = null;
+
+	public static $tasks = [
+		'info',
+		'sync'
+	];
 
 	/**
 	 * @var array
@@ -73,6 +86,8 @@ class TagSync
 	 */
 	protected $libraryIndex = [];
 
+	protected $cli = false;
+
 	const LOG_INFO = 0;
 	const LOG_SUCCESS = 1;
 	const LOG_WARNING = 2;
@@ -109,6 +124,8 @@ class TagSync
 	 */
 	public function __construct()
 	{
+		$this->cli = PHP_SAPI === 'cli';
+
 		if (DS === '\\') {
 			$this->isWindows = true;
 			// https://github.com/kenjiuno/php-wfio
@@ -122,11 +139,9 @@ class TagSync
 		getID3::$mtags = $this;
 
 		$this->id3 = new getID3();
-		$this->id3->option_tag_lyrics3 = false;
-		$this->id3->option_tags_html = false;
 		$this->id3->option_tags_process = false;
+		$this->id3->option_tags_html = false;
 		$this->id3->option_save_attachments = false;
-		$this->id3->option_extra_info = false;
 	}
 
 	/**
@@ -134,43 +149,157 @@ class TagSync
 	 */
 	public function parseArgs()
 	{
-		$args = CommandLine::parseArgs();
+		if (!$this->cli) {
+			$this->log(__METHOD__.' can\'t be used in a SAPI other than cli.', static::LOG_HALT);
+		}
 
-		$this->srcDir = !empty($args[0]) ? $args[0] : null;
-		$this->destDir = !empty($args[1]) ? $args[1] : null;
-		$this->orphanDir = !empty($args['move-orphaned']) ? $args['move-orphaned'] : false;
-		$this->convertPaths = CommandLine::getBoolean('convert-paths', $this->convertPaths);
-		$this->emulation = CommandLine::getBoolean('emulation', $this->emulation);
-		$this->verbose = CommandLine::getBoolean('verbose', $this->verbose);
-		$this->colored = CommandLine::getBoolean('colored', !$this->isWindows);
+		$this->args = CommandLine::parseArgs();
+		$this->currentTask = !empty($this->args[0]) && in_array($this->args[0], static::$tasks) ? $this->args[0] : null;
 
-		if (!$this->srcDir || !$this->destDir || isset($args['help'])) {
-			$orphanDir = static::ORPHAN_DIR;
+		if (!$this->currentTask || isset($this->args['help'])) {
 			$version = static::VERSION;
+			$mtags = $this->isWindows ? 'mtags.bat' : 'php mtags.phar';
 
 			echo <<<TXT
 m-TAGS Sync {$version}
 
 Usage:
-mtags source-directory destination-directory [options]
+{$mtags} info media-file [options]
+{$mtags} sync source-directory destination-directory [options]
 
 Options:
---no-relative           Always write absolute paths.
---convert-paths         Convert existing paths, if they don't match the --no-relative option.
---move-orphaned[=path]  Move orphaned .tags to a separate directory ({$orphanDir} in a source directory by default).
---colored               Colored output.
 --verbose               Show even more messages.
+--colored               Colored output.
 --emulate               Don't do anything real.
 --help                  Show this info.
+
+Sync options:
+--no-relative           Always write absolute paths.
+--convert-paths         Convert existing paths, if they don't match the --no-relative option.
+--move-orphaned[=path]  Move orphaned .tags to a separate directory.
 
 TXT;
 			exit;
 		}
 
+		$this->colored = CommandLine::getBoolean('colored', !$this->isWindows);
+		$this->verbose = CommandLine::getBoolean('verbose', $this->verbose);
+		$this->emulation = CommandLine::getBoolean('emulate', $this->emulation);
+
+		return $this->currentTask;
+	}
+
+	/**
+	 * @param $dir
+	 * @param array $ext
+	 * @return array
+	 */
+	public function findFilesRecursively($dir, array $ext = [])
+	{
+		$matches = $media = [];
+
+		if ($this->isWindows) {
+			if ($ext) {
+				$ext = array_map(function ($ext) {
+					return '*.'.$ext;
+				}, $ext);
+				$ext = implode(' ', $ext);
+			} else {
+				$ext = '*.*';
+			}
+
+			$command = 'cmd /u /c chcp 65001>nul && where /t /f /r "'.$dir.'" '.$ext.' 2>nul';
+			$this->log('Executing shell command:', static::LOG_DEBUG, $command);
+			$lines = shell_exec($command);
+
+			if ($lines !== null) {
+				$lines = trim($lines);
+				preg_match_all('#^\s*(\d+).+"(.+)\x5c(.+\.([^.]+))"\s*$#m', $lines, $matches, PREG_SET_ORDER);
+			}
+		} else {
+			if ($ext) {
+				$ext = array_map(function ($ext) {
+					return '-iname "*.'.$ext.'"';
+				}, $ext);
+				$ext = '\\( '.implode(' -o ', $ext).' \\)';
+			} else {
+				$ext = '';
+			}
+
+			$command = 'find "'.$dir.'" '.$ext.' -type f -printf "%s|%h|%f\n"';
+			$this->log('Executing shell command:', static::LOG_DEBUG, $command);
+			$lines = shell_exec($command);
+
+			if ($lines !== null) {
+				$lines = trim($lines);
+				preg_match_all('#^(.+)\|(.+)\|(.+\.([^.]+))$#m', $lines, $matches, PREG_SET_ORDER);
+			}
+		}
+
+		$this->log(count($matches).' files found', static::LOG_DEBUG);
+
+		foreach ($matches as $match) {
+			if (strcasecmp($match[4], 'cue') === 0) {
+				$media[$match[2]]['cues'][] = $match[3];
+			} else {
+				$media[$match[2]]['files'][] = $match[3];
+				$media[$match[2]]['info'][$match[3]] = [ctype_lower($match[4]) ? $match[4] : strtolower($match[4]), $match[1]];
+				$media[$match[2]]['sizes'][] = $match[1];
+			}
+		}
+
+		return $media;
+	}
+
+	public function analyze($mediaFile = null)
+	{
+		$this->id3->option_tag_lyrics3 = true;
+		$this->id3->option_extra_info = true;
+
+		if ($this->cli && !empty($this->args[1])) {
+			$mediaFile = $this->args[1];
+
+			if ($this->isWindows) {
+				$mediaFile = wfio_path2utf8($mediaFile);
+			}
+		}
+
+		if (!$mediaFile) {
+			$this->log("Set media file!", self::LOG_HALT);
+		}
+
+		return $this->id3->analyze($mediaFile);
+	}
+
+	/**
+	 * Syncs destination directory with source
+	 */
+	public function sync()
+	{
+		$this->id3->option_tag_lyrics3 = false;
+		$this->id3->option_extra_info = false;
+
+		if ($this->cli) {
+			$args = $this->args;
+			$this->srcDir = !empty($args[1]) ? $args[1] : null;
+			$this->destDir = !empty($args[2]) ? $args[2] : null;
+			$this->orphanDir = !empty($args['move-orphaned']) ? $args['move-orphaned'] : false;
+			$this->convertPaths = CommandLine::getBoolean('convert-paths', $this->convertPaths);
+			$this->relativePaths = !CommandLine::getBoolean('no-relative', $this->relativePaths);
+		}
+
 		$this->origSrcDir = $this->srcDir;
 		$this->origDestDir = $this->destDir;
 
-		if ($this->isWindows) {
+		if (!$this->srcDir) {
+			$this->log("Set source directory!", self::LOG_HALT);
+		}
+
+		if (!$this->destDir) {
+			$this->log("Set destination directory!", self::LOG_HALT);
+		}
+
+		if ($this->cli && $this->isWindows) {
 			$this->srcDir = wfio_path2utf8($this->srcDir);
 			$this->destDir = wfio_path2utf8($this->destDir);
 		}
@@ -198,76 +327,10 @@ TXT;
 			}
 		}
 
-		$this->relativePaths = !CommandLine::getBoolean('no-relative', $this->relativePaths);
-
 		if ($this->isWindows) {
 			$this->relativePaths = $this->relativePaths && strtolower($this->srcDir[0]) === strtolower($this->destDir[0]);
 		}
-	}
 
-	/**
-	 * @param $dir
-	 * @param array $ext
-	 * @return array
-	 */
-	public function findFilesRecursively($dir, array $ext = [])
-	{
-		$matches = $media = [];
-
-		if ($this->isWindows) {
-			if ($ext) {
-				$ext = array_map(function ($ext) {
-					return '*.'.$ext;
-				}, $ext);
-				$ext = implode(' ', $ext);
-			} else {
-				$ext = '*.*';
-			}
-
-			$command = 'cmd /u /c chcp 65001>nul && where /t /f /r "'.$dir.'" '.$ext.' 2>nul';
-			$lines = shell_exec($command);
-
-			if ($lines !== null) {
-				$lines = trim($lines);
-				preg_match_all('#^\s*(\d+).+"(.+)\x5c(.+\.([^.]+))"\s*$#m', $lines, $matches, PREG_SET_ORDER);
-			}
-		} else {
-			if ($ext) {
-				$ext = array_map(function ($ext) {
-					return '-iname "*.'.$ext.'"';
-				}, $ext);
-				$ext = '\\( '.implode(' -o ', $ext).' \\)';
-			} else {
-				$ext = '';
-			}
-
-			$command = 'find "'.$dir.'" '.$ext.' -type f -printf "%s|%h|%f\n"';
-			$lines = shell_exec($command);
-
-			if ($lines !== null) {
-				$lines = trim($lines);
-				preg_match_all('#^(.+)\|(.+)\|(.+\.([^.]+))$#m', $lines, $matches, PREG_SET_ORDER);
-			}
-		}
-
-		foreach ($matches as $match) {
-			if (strcasecmp($match[4], 'cue') === 0) {
-				$media[$match[2]]['cues'][] = $match[3];
-			} else {
-				$media[$match[2]]['files'][] = $match[3];
-				$media[$match[2]]['info'][$match[3]] = [ctype_lower($match[4]) ? $match[4] : strtolower($match[4]), $match[1]];
-				$media[$match[2]]['sizes'][] = $match[1];
-			}
-		}
-
-		return $media;
-	}
-
-	/**
-	 * Syncs destination directory with source
-	 */
-	public function sync()
-	{
 		$this->indexLibrary();
 
 		$this->log("Indexing source files in ".$this->srcDir);
@@ -310,6 +373,8 @@ TXT;
 		}
 
 		$this->resetConsoleColor();
+
+		echo "Synced.\n";
 	}
 
 	/**
@@ -331,6 +396,8 @@ TXT;
 			? 'cmd /u /c chcp 65001>nul && dir "'.$this->destDir.DS.'*.'.static::EXT.'" /B /S 2>nul'
 			: 'find "'.$this->destDir.'" -type f -iname "*.'.static::EXT.'"';
 
+		$this->log('Executing shell command:', static::LOG_DEBUG, $files);
+
 		$files = shell_exec($files);
 
 		if (!$files || mb_strpos($files, $this->destDir) === false) {
@@ -340,6 +407,8 @@ TXT;
 
 		$this->library = [];
 		$files = explode("\n", trim($files));
+
+		$this->log(count($files).' files found:', static::LOG_DEBUG, null, "\n");
 
 		foreach ($files as $file) {
 			if (!$item = $this->loadLibraryItem($file)) {
@@ -1092,6 +1161,10 @@ TXT;
 
 		if (!isset(static::$verboseLevels[$level]) || $this->verbose) {
 			echo $this->coloredOutput($str, $color ?: static::$consoleColors[$level]).($subject ? "\n" : '').$subject.$lineBreak;
+		}
+
+		if ($level === self::LOG_HALT) {
+			exit;
 		}
 	}
 
