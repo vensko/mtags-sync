@@ -29,8 +29,11 @@ class LibraryItem
 		$this->tags = $tags;
 		$this->file = $file;
 
-		if ($this->file && mb_substr($this->file, -5) !== '.'.TagSync::EXT) {
-			$this->file .= '.'.TagSync::EXT;
+		if ($this->file) {
+			$ext = explode('.', $this->file);
+			if (array_pop($ext) !== TagSync::EXT) {
+				$this->file .= '.'.TagSync::EXT;
+			}
 		}
 	}
 
@@ -96,21 +99,21 @@ class LibraryItem
 			$file = array_search($tag[$key], $index);
 
 			if ($file) {
-				echo "Fixing path:\n";
+				$this->sync->log("Fixing path:", TagSync::LOG_WARNING, null, "\n");
 
 				if (!empty($this->tags[$k][TagSync::PATH_KEY])) {
-					echo "- ".$this->tags[$k][TagSync::PATH_KEY]."\n";
+					$this->sync->log("- ".$this->tags[$k][TagSync::PATH_KEY], TagSync::LOG_WARNING, null, "\n", TagSync::CONSOLE_WHITE);
 				} else {
-					echo "- [EMPTY]\n";
+					$this->sync->log("- [EMPTY]", TagSync::LOG_WARNING, null, "\n", TagSync::CONSOLE_WHITE);
 				}
 
 				$this->tags[$k][TagSync::PATH_KEY] = ($this->sync->isWindows ? '/' : '').str_replace(DS, '/', $dir).'/'.$file;
 
-				echo "+ ".$this->tags[$k][TagSync::PATH_KEY]."\n";
+				$this->sync->log("+ ".$this->tags[$k][TagSync::PATH_KEY], TagSync::LOG_WARNING, null, "\n\n", TagSync::CONSOLE_WHITE);
 
 				$changed = true;
-			} else if ($this->sync->verbose) {
-				echo "No new path for ".$this->tags[$k][TagSync::PATH_KEY]."\n\n";
+			} else {
+				$this->sync->log("No new path for", TagSync::LOG_DEBUG, $this->tags[$k][TagSync::PATH_KEY]);
 			}
 		}
 
@@ -133,12 +136,12 @@ class LibraryItem
 		$file = $file ?: $this->file;
 
 		if (!$file) {
-			echo "No file path set.\n\n";
+			$this->sync->log("Attempted to save a library item without file path set.", TagSync::LOG_ERROR);
 			return false;
 		}
 
 		if (!$this->tags) {
-			echo "Nothing to save in\n".$file."\n\n";
+			$this->sync->log("Nothing to save in", TagSync::LOG_ERROR, $file);
 			return false;
 		}
 
@@ -146,7 +149,8 @@ class LibraryItem
 
 		if (!file_exists($this->sync->win.$destFileDir)) {
 			if (!$this->sync->mkdir($destFileDir, $this->sync->dir_chmod, true)) {
-				echo "Failed to create directory ".$destFileDir."\nSkipping: ".$file."\n\n";
+				$this->sync->log("Failed to create directory", TagSync::LOG_ERROR, $destFileDir, "\n");
+				$this->sync->log("Skipping", TagSync::LOG_ERROR, $file);
 				return false;
 			}
 			// Workaround for asynchronous file systems like Samba
@@ -165,7 +169,7 @@ class LibraryItem
 		if ($this->sync->relativePaths && ($this->fixedPaths || $this->sync->convertPaths || !file_exists($this->sync->win.$file))) {
 			foreach ($this->tags as $i => $tag) {
 				if ($this->sync->isWindows) {
-					$this->tags[$i][$k] = $this->sync->mb_trim($this->tags[$i][$k], '/');
+					$this->tags[$i][$k] = ltrim($this->tags[$i][$k], '/');
 				}
 				$this->tags[$i][$k] = $this->sync->findRelativePath($this->sync->dirname($file), $this->tags[$i][$k]);
 				$this->tags[$i][$k] = str_replace(DS, '/', $this->tags[$i][$k]);
@@ -174,8 +178,11 @@ class LibraryItem
 
 		if ($this->sync->isWindows) {
 			foreach ($this->tags as $i => $tag) {
-				if (mb_strpos($this->tags[$i][$k], ':') !== false) {
-					$this->tags[$i][$k] = strtoupper(mb_substr($this->tags[$i][$k], 0, 2)).mb_substr($this->tags[$i][$k], 2);
+				if ($this->tags[$i][$k][2] === ':') {
+					$disk = $this->tags[$i][$k][1];
+					$this->tags[$i][$k] = ltrim($this->tags[$i][$k], '/');
+					$this->tags[$i][$k] = ltrim($this->tags[$i][$k], $disk);
+					$this->tags[$i][$k] = '/'.strtoupper($disk).$this->tags[$i][$k];
 				}
 			}
 		}
@@ -191,17 +198,15 @@ class LibraryItem
 		);
 
 		if (!$json) {
-			echo "Saving failed (JSON error #".json_last_error()."):\n".$file."\n\n";
+			$this->sync->log("Saving failed (JSON error #".json_last_error().")", TagSync::LOG_ERROR, $file);
 			return false;
 		}
 
 		if ($this->sync->emulation) {
-			echo "Saving (EMULATION): ".$file."\n";
+			$this->sync->log("Saving (EMULATION):", TagSync::LOG_INFO, $file, "\n");
 			$result = true;
 		} else {
-			if ($this->sync->verbose) {
-				echo "Saving: ".$file."\n";
-			}
+			$this->sync->log("Saving:", TagSync::LOG_DEBUG, $file, "\n");
 
 			$result = file_put_contents(
 				$this->sync->win.$file,

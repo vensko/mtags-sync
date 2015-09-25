@@ -22,13 +22,31 @@ class TagSync
 	const FP_KEY = '@FP';
 	const DURATION_KEY = 'DURATION';
 
+	const LOG_INFO = 0;
+	const LOG_SUCCESS = 1;
+	const LOG_WARNING = 2;
+	const LOG_DEBUG = 3;
+	const LOG_ERROR = 4;
+	const LOG_HALT = 5;
+
+	const CONSOLE_BLACK = '1;30';
+	const CONSOLE_RED = '1;31';
+	const CONSOLE_GREEN = '1;32';
+	const CONSOLE_YELLOW = '1;33';
+	const CONSOLE_BLUE = '1;34';
+	const CONSOLE_PURPLE = '1;35';
+	const CONSOLE_CYAN = '1;36';
+	const CONSOLE_GRAY = '0;37';
+	const CONSOLE_WHITE = '1;37';
+
 	public $origSrcDir, $origDestDir, $srcDir, $destDir, $destFile, $orphanDir;
 	public $relativePaths = false;
 	public $convertPaths = false;
 	public $dir_chmod = 0755;
 
+	public $colored = false;
 	public $emulation = false;
-	public $verbose = false;
+	public $verbose = null;
 
 	/**
 	 * @var array
@@ -88,8 +106,7 @@ class TagSync
 			if (extension_loaded(static::WIN_EXT)) {
 				$this->win = static::WIN_WRAPPER;
 			} else {
-				echo "php_wfio not loaded.\n\n";
-				exit;
+				$this->log("php_wfio not loaded.", self::LOG_HALT);
 			}
 		}
 
@@ -113,13 +130,15 @@ class TagSync
 		$this->srcDir = !empty($args[0]) ? $args[0] : null;
 		$this->destDir = !empty($args[1]) ? $args[1] : null;
 		$this->orphanDir = !empty($args['move-orphaned']) ? $args['move-orphaned'] : false;
-		$this->convertPaths = !empty($args['convert-paths']) ? (bool)$args['convert-paths'] : false;
-		$this->emulation = !empty($args['emulation']) ? (bool)$args['emulation'] : false;
-		$this->verbose = !empty($args['verbose']) ? (bool)$args['verbose'] : false;
+		$this->convertPaths = CommandLine::getBoolean('convert-paths', $this->convertPaths);
+		$this->emulation = CommandLine::getBoolean('emulation', $this->emulation);
+		$this->verbose = CommandLine::getBoolean('verbose', $this->verbose);
+		$this->colored = CommandLine::getBoolean('colored', !$this->isWindows);
 
 		if (!$this->srcDir || !$this->destDir || isset($args['help'])) {
 			$orphanDir = static::ORPHAN_DIR;
 			$version = static::VERSION;
+
 			echo <<<TXT
 m-TAGS Sync {$version}
 
@@ -151,14 +170,12 @@ TXT;
 
 		if (!$this->destDir || !is_dir($this->win.$this->destDir)) {
 			if (!$this->mkdir($this->destDir, $this->dir_chmod, true)) {
-				echo "Failed to create the destination directory. Create it manually.\n\n";
-				exit;
+				$this->log("Failed to create the destination directory. Create it manually.", self::LOG_HALT);
 			}
 		}
 
 		if (!$this->srcDir || !is_dir($this->win.$this->srcDir)) {
-			echo "Source directory not found.\n\n";
-			exit;
+			$this->log("Source directory not found.", self::LOG_HALT);
 		}
 
 		if ($this->orphanDir && is_bool($this->orphanDir)) {
@@ -167,16 +184,63 @@ TXT;
 
 		if ($this->orphanDir && is_string($this->orphanDir) && !is_dir($this->win.$this->orphanDir)) {
 			if (!$this->mkdir($this->orphanDir, $this->dir_chmod, true)) {
-				echo "Failed to create directory for orphaned tags ".$this->orphanDir.", please, create it manually.\n\n";
-				exit;
+				$this->log("Failed to create directory for orphaned tags ".$this->orphanDir.", please, create it manually.", self::LOG_HALT);
 			}
 		}
 
-		$this->relativePaths = isset($args['no-relative']) ? !(bool)$args['no-relative'] : true;
+		$this->relativePaths = !CommandLine::getBoolean('no-relative', $this->relativePaths);
 
 		if ($this->isWindows) {
-			$this->relativePaths = $this->relativePaths && (mb_strtolower(mb_substr($this->srcDir, 0, 2)) === mb_strtolower(mb_substr($this->destDir, 0, 2)));
+			$this->relativePaths = $this->relativePaths && strtolower($this->srcDir[0]) === strtolower($this->destDir[0]);
 		}
+	}
+
+	/**
+	 * @param $str
+	 * @param int $level
+	 * @param null $subject
+	 * @param string $lineBreak
+	 * @param null $color
+	 */
+	public function log($str, $level = self::LOG_INFO, $subject = null, $lineBreak = "\n\n", $color = null)
+	{
+		if ($this->verbose === false) {
+			return;
+		}
+
+		if ($subject) {
+			$subject = "\n".$subject;
+		}
+
+		switch ($level) {
+			case self::LOG_INFO:
+				echo $this->coloredOutput($str, $color ?: static::CONSOLE_WHITE).$subject.$lineBreak;
+				break;
+			case self::LOG_WARNING:
+				echo $this->coloredOutput($str, $color ?: static::CONSOLE_YELLOW).$subject.$lineBreak;
+				break;
+			case self::LOG_SUCCESS:
+				if ($this->verbose) {
+					echo $this->coloredOutput($str, $color ?: static::CONSOLE_GREEN).$subject.$lineBreak;
+				}
+				break;
+			case self::LOG_DEBUG:
+				if ($this->verbose) {
+					echo $this->coloredOutput($str, $color ?: static::CONSOLE_CYAN).$subject.$lineBreak;
+				}
+				break;
+			case self::LOG_ERROR:
+				echo $this->coloredOutput($str, $color ?: static::CONSOLE_RED).$subject.$lineBreak;
+				break;
+			case self::LOG_HALT:
+				echo $this->coloredOutput($str, $color ?: static::CONSOLE_PURPLE).$subject.$lineBreak;
+				exit;
+		}
+	}
+
+	protected function coloredOutput($str, $color = null)
+	{
+		return ($this->colored && $color !== null) ? "\033[".$color."m".$str."\033[37m" : $str;
 	}
 
 	/**
@@ -244,7 +308,7 @@ TXT;
 	{
 		$this->indexLibrary();
 
-		echo "Indexing source files in ".$this->srcDir."\n\n";
+		$this->log("Indexing source files in ".$this->srcDir);
 
 		$ext = array_keys($this->mediaTypes);
 		$ext[] = 'cue';
@@ -252,24 +316,20 @@ TXT;
 		$mediaFiles = $this->findFilesRecursively($this->origSrcDir, $ext);
 
 		if (!$mediaFiles) {
-			echo "No media files found.\n";
-			return;
+			$this->log("No media files found.", self::LOG_HALT);
 		}
 
 		foreach ($mediaFiles as $dir => $contents) {
 			if (!$mediums = $this->analyzeDirectory($dir, $contents)) {
-				echo "- No candidates found in ".$dir.", skipping.\n\n";
+				$this->log("No candidates found, skipping.", self::LOG_DEBUG, $dir);
 				continue;
 			}
 
 			foreach ($mediums as $medium) {
 				if (!$medium->exists) {
-					echo "+ ".$medium->file."\n";
 					if ($this->addToLibrary($medium)) {
 						$this->library[$medium->file] = $medium;
-						if ($this->verbose) {
-							echo "+ Successfully saved.\n\n";
-						}
+						$this->log("Added: ".$medium->file, self::LOG_INFO, null, "\n\n", self::CONSOLE_GREEN);
 					}
 				}
 			}
@@ -279,12 +339,21 @@ TXT;
 		foreach ($this->library as $file => $medium) {
 			if (!$medium->exists) {
 				if ($this->orphanDir) {
-					echo "* Files don't exist anymore, moving to ".$this->orphanDir.":\n".$file."\n\n";
+					$this->log("Files don't exist anymore, moving to ".$this->orphanDir.".", self::LOG_WARNING, $file);
 					rename($this->win.$file, $this->win.$this->orphanDir.DS.date('Y-d-m H-i-ss').'-'.++$index.' '.$this->basename($file));
 				} else {
-					echo "* Files don't exist anymore, can be safely removed:\n".$file."\n(Use the --move-orphaned parameter to move it automatically.)\n\n";
+					$this->log("Files don't exist anymore, can be safely removed:", self::LOG_WARNING, $file);
 				}
 			}
+		}
+
+		$this->resetConsoleColor();
+	}
+
+	public function resetConsoleColor()
+	{
+		if ($this->colored) {
+			echo "\033[0m";
 		}
 	}
 
@@ -296,12 +365,8 @@ TXT;
 
 		$files = shell_exec($files);
 
-		if ($files === null) {
-			echo "Unable to load the library\n\n";
-			return;
-		}
-
-		if (mb_strpos($files, $this->destDir) === false) {
+		if (!$files || mb_strpos($files, $this->destDir) === false) {
+			$this->log("Library is empty?", self::LOG_WARNING);
 			return;
 		}
 
@@ -310,22 +375,20 @@ TXT;
 
 		foreach ($files as $file) {
 			if (!$item = $this->loadLibraryItem($file)) {
-				echo "- Empty or corrupted file, skipping:\n".$file."\n\n";
+				$this->log("Empty or corrupted file, skipping:", self::LOG_ERROR, $file);
 				continue;
 			}
 
 			foreach ($item->tags as $tag) {
-				if (isset($tag[static::PATH_KEY])) {
-					$i = mb_substr($tag[static::PATH_KEY], 0, 1);
+				if (!empty($tag[static::PATH_KEY])) {
+					$i = $tag[static::PATH_KEY][0];
 					if ($i !== '/' && $i !== '.') {
 						continue 2;
 					}
 				}
 			}
 
-			if ($this->verbose) {
-				echo $item->file."\n";
-			}
+			$this->log($item->file, self::LOG_DEBUG, null, "\n");
 
 			$this->library[$file] = $item;
 
@@ -336,6 +399,8 @@ TXT;
 				}
 			}
 		}
+
+		$this->log("", self::LOG_DEBUG, null, "\n");
 	}
 
 	/**
@@ -343,7 +408,7 @@ TXT;
 	 */
 	protected function indexLibrary()
 	{
-		echo "Indexing library in ".$this->destDir."\n\n";
+		$this->log("Indexing library in ".$this->destDir);
 
 		$this->loadLibrary();
 
@@ -360,7 +425,7 @@ TXT;
 				}
 			}
 			if ($medium->broken) {
-				echo "~ Invalid paths, preparing to fix:\n".$file."\n\n";
+				$this->log("Invalid paths, queued for fix.", self::LOG_WARNING, $file);
 			} else {
 				$medium->exists = true;
 			}
@@ -381,10 +446,7 @@ TXT;
 		}
 
 		if ($item = $this->getItemById(static::SIZE_KEY, $contents['sizes'], $dir, $contents['files'])) {
-			if ($this->verbose) {
-				echo "Matched by file sizes:\n".$dir."\n\n";
-			}
-
+			$this->log("Matched by file sizes:", self::LOG_DEBUG, $dir);
 			return [$item];
 		}
 
@@ -405,11 +467,11 @@ TXT;
 			$data = $this->id3->analyze($dir.DS.$file, $size);
 
 			if (!$data || isset($data['error'])) {
-				echo "getID3 error:\n".$file."\n";
+				$this->log("getID3 error:", self::LOG_ERROR, $file, "\n");
 				if (!empty($data['error'])) {
-					echo implode("\n", $data['error']);
+					$this->log(implode("\n", $data['error']), self::LOG_WARNING, null, "\n");
 				}
-				echo "\n";
+				$this->log("\n", self::LOG_ERROR);
 				$contents['data'][$file] = $contents['tags'][$file] = [];
 			} else {
 				$contents['durations'][$file] = $data['playtime_seconds'] = !empty($data['playtime_seconds'])
@@ -433,6 +495,8 @@ TXT;
 					}
 
 					$tags = $this->fixMapping($ext, $tags);
+				} else {
+					$this->log("No tags found.", self::LOG_DEBUG, $file);
 				}
 
 				$contents['tags'][$file] = $tags;
@@ -449,19 +513,13 @@ TXT;
 		if ($fileNum) {
 			$md5ids = array_filter(array_column($contents['data'], 'md5_data_source'));
 			if ($md5ids && count($md5ids) === $fileNum && $item = $this->getItemById(static::MD5_KEY, $md5ids, $dir, $contents['files'])) {
-				if ($this->verbose) {
-					echo "Matched by md5 hashes:\n".$dir."\n\n";
-				}
-
+				$this->log("Matched by md5 hashes:", self::LOG_DEBUG, $dir);
 				return [$item];
 			}
 
 			$durations = array_filter(array_column($contents['data'], 'playtime_seconds'));
 			if ($durations && count($durations) === $fileNum && $item = $this->getItemById(static::DURATION_KEY, $durations, $dir, $contents['files'])) {
-				if ($this->verbose) {
-					echo "Matched by duration:\n".$dir."\n\n";
-				}
-
+				$this->log("Matched by duration:", self::LOG_DEBUG, $dir);
 				return [$item];
 			}
 
@@ -528,11 +586,7 @@ TXT;
 			foreach ([static::INDEX_KEY, static::DURATION_KEY] as $key) {
 				$id = array_column($tracks, $key);
 				if ($id && count($id) === $trackNum && $item = $this->getItemById($key, $id, $dir, $basenames)) {
-					if ($this->verbose) {
-						$crit = $key === static::INDEX_KEY ? 'TOC' : 'duration';
-						echo "Cue sheet matched by ".$crit.":\n".$dir.DS.($cueFile ?: $file)."\n\n";
-					}
-
+					$this->log("Cue sheet matched by ".($key === static::INDEX_KEY ? 'TOC' : 'duration'), self::LOG_DEBUG, $dir.DS.($cueFile ?: $file));
 					$mediums[] = $item;
 					$found = true;
 					break;
@@ -557,7 +611,7 @@ TXT;
 	protected function addToLibrary(LibraryItem $item)
 	{
 		if (!$item->file) {
-			echo "Unable to add a medium without file path\n\n";
+			$this->log("Unable to add a medium without file path.", self::LOG_ERROR);
 			return false;
 		}
 
@@ -597,11 +651,9 @@ TXT;
 			$item = $index[$id];
 
 			if ($item->broken) {
-				if ($item->setPaths($key, $dir, $valuesIndex) && $item->save()) {
-					echo "+ Successfully saved.\n\n";
-				} else {
-					echo "- Hmm, nothing changed.\n\n";
-				}
+				($item->setPaths($key, $dir, $valuesIndex) && $item->save())
+					? $this->log("Successfully saved.", self::LOG_SUCCESS)
+					: $this->log("Hmm, nothing changed.", self::LOG_WARNING);
 			}
 
 			$item->exists = true;
@@ -671,7 +723,7 @@ TXT;
 			if (isset($tags['CUE_TRACK'.$track.'_LYRICS'])) {
 				$tags['LYRICS'] = $tags['CUE_TRACK'.$track.'_LYRICS'];
 				foreach (array_keys($tags) as $key) {
-					if (strpos($key, '_LYRICS', 7) !== false) {
+					if (strpos($key, '_LYRICS') !== false) {
 						unset($tags[$key]);
 					}
 				}
@@ -850,28 +902,30 @@ TXT;
 	 */
 	public function findRelativePath($fromPath, $toPath)
 	{
-		$fromPath = str_replace(['/', '\\'], DS, $fromPath);
-		$toPath = str_replace(['/', '\\'], DS, $toPath);
+		$ds = strpos($fromPath, '/') === false ? '\\' : '/';
 
-		$fromWin = mb_substr($fromPath, 1, 1) === ':';
-		$toWin = mb_substr($toPath, 1, 1) === ':';
+		$fromPath = str_replace(['/', '\\'], $ds, $fromPath);
+		$toPath = str_replace(['/', '\\'], $ds, $toPath);
+
+		$fromWin = $fromPath[1] === ':';
+		$toWin = $toPath[1] === ':';
 
 		if ($fromWin && $toWin) {
-			if (mb_strtolower(mb_substr($fromPath, 0, 2)) !== mb_strtolower(mb_substr($toPath, 0, 2))) {
+			if (strtolower($fromPath[0]) !== strtolower($toPath[0])) {
 				return $toPath;
 			}
 
 			if ($fromWin) {
-				$fromPath = mb_split('[:]', $fromPath)[1];
+				$fromPath = explode(':', $fromPath)[1];
 			}
 
 			if ($toWin) {
-				$toPath = mb_split('[:]', $toPath)[1];
+				$toPath = explode(':', $toPath)[1];
 			}
 		}
 
-		$from = mb_split('['.preg_quote(DS).']', $fromPath); // Folders/File
-		$to = mb_split('['.preg_quote(DS).']', $toPath); // Folders/File
+		$from = explode($ds, $fromPath); // Folders/File
+		$to = explode($ds, $toPath); // Folders/File
 
 		$relPath = '';
 		$i = 0;
@@ -885,18 +939,18 @@ TXT;
 
 		// Add '..' until the path is the same
 		while ($i <= $j) {
-			if (!empty($from[$j])) $relPath .= '..'.DS;
+			if (!empty($from[$j])) $relPath .= '..'.$ds;
 			$j--;
 		}
 
 		// Go to folder from where it starts differing
 		while (isset($to[$i])) {
-			if (!empty($to[$i])) $relPath .= $to[$i].DS;
+			if (!empty($to[$i])) $relPath .= $to[$i].$ds;
 			$i++;
 		}
 
 		// Strip last separator
-		return mb_substr($relPath, 0, -1);
+		return rtrim($relPath, $ds);
 	}
 
 	/**
@@ -986,7 +1040,7 @@ TXT;
 	 */
 	public function isAbsolutePath($path)
 	{
-		return mb_substr($path, 1, 1) === ':' || mb_substr($path, 0, 1) === '/';
+		return $path[0] === '/' || $path[1] === ':';
 	}
 
 	/**
