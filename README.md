@@ -17,6 +17,7 @@ Options:
 --no-relative           Always write absolute paths.
 --convert-paths         Convert existing paths, if they don't match the --no-relative option.
 --move-orphaned[=path]  Move orphaned .tags to a [path]
+--colored               Colored output.  
 --verbose               Show even more messages.
 --emulate               Don't do anything real.
 --help                  Shows this info.

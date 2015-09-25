@@ -149,6 +149,7 @@ Options:
 --no-relative           Always write absolute paths.
 --convert-paths         Convert existing paths, if they don't match the --no-relative option.
 --move-orphaned[=path]  Move orphaned .tags to a separate directory ({$orphanDir} in a source directory by default).
+--colored               Colored output.
 --verbose               Show even more messages.
 --emulate               Don't do anything real.
 --help                  Show this info.
