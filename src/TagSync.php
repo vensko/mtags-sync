@@ -22,23 +22,6 @@ class TagSync
 	const FP_KEY = '@FP';
 	const DURATION_KEY = 'DURATION';
 
-	const LOG_INFO = 0;
-	const LOG_SUCCESS = 1;
-	const LOG_WARNING = 2;
-	const LOG_DEBUG = 3;
-	const LOG_ERROR = 4;
-	const LOG_HALT = 5;
-
-	const CONSOLE_BLACK = '1;30';
-	const CONSOLE_RED = '1;31';
-	const CONSOLE_GREEN = '1;32';
-	const CONSOLE_YELLOW = '1;33';
-	const CONSOLE_BLUE = '1;34';
-	const CONSOLE_PURPLE = '1;35';
-	const CONSOLE_CYAN = '1;36';
-	const CONSOLE_GRAY = '0;37';
-	const CONSOLE_WHITE = '1;37';
-
 	public $origSrcDir, $origDestDir, $srcDir, $destDir, $destFile, $orphanDir;
 	public $relativePaths = false;
 	public $convertPaths = false;
@@ -90,10 +73,36 @@ class TagSync
 	 */
 	protected $libraryIndex = [];
 
-	/**
-	 * @var array
-	 */
-	protected $brokenLibraryFiles = [];
+	const LOG_INFO = 0;
+	const LOG_SUCCESS = 1;
+	const LOG_WARNING = 2;
+	const LOG_DEBUG = 3;
+	const LOG_ERROR = 4;
+	const LOG_HALT = 5;
+
+	const CONSOLE_BLACK = '1;30';
+	const CONSOLE_RED = '1;31';
+	const CONSOLE_GREEN = '1;32';
+	const CONSOLE_YELLOW = '1;33';
+	const CONSOLE_BLUE = '1;34';
+	const CONSOLE_PURPLE = '1;35';
+	const CONSOLE_CYAN = '1;36';
+	const CONSOLE_GRAY = '0;37';
+	const CONSOLE_WHITE = '1;37';
+
+	public static $consoleColors = [
+		self::LOG_INFO => self::CONSOLE_WHITE,
+		self::LOG_WARNING => self::CONSOLE_YELLOW,
+		self::LOG_SUCCESS => self::CONSOLE_GREEN,
+		self::LOG_DEBUG => self::CONSOLE_CYAN,
+		self::LOG_ERROR => self::CONSOLE_RED,
+		self::LOG_HALT => self::CONSOLE_PURPLE
+	];
+
+	public static $verboseLevels = [
+		self::LOG_SUCCESS => true,
+		self::LOG_DEBUG => true
+	];
 
 	/**
 	 * Constructor
@@ -194,54 +203,6 @@ TXT;
 		if ($this->isWindows) {
 			$this->relativePaths = $this->relativePaths && strtolower($this->srcDir[0]) === strtolower($this->destDir[0]);
 		}
-	}
-
-	/**
-	 * @param $str
-	 * @param int $level
-	 * @param null $subject
-	 * @param string $lineBreak
-	 * @param null $color
-	 */
-	public function log($str, $level = self::LOG_INFO, $subject = null, $lineBreak = "\n\n", $color = null)
-	{
-		if ($this->verbose === false) {
-			return;
-		}
-
-		if ($subject) {
-			$subject = "\n".$subject;
-		}
-
-		switch ($level) {
-			case self::LOG_INFO:
-				echo $this->coloredOutput($str, $color ?: static::CONSOLE_WHITE).$subject.$lineBreak;
-				break;
-			case self::LOG_WARNING:
-				echo $this->coloredOutput($str, $color ?: static::CONSOLE_YELLOW).$subject.$lineBreak;
-				break;
-			case self::LOG_SUCCESS:
-				if ($this->verbose) {
-					echo $this->coloredOutput($str, $color ?: static::CONSOLE_GREEN).$subject.$lineBreak;
-				}
-				break;
-			case self::LOG_DEBUG:
-				if ($this->verbose) {
-					echo $this->coloredOutput($str, $color ?: static::CONSOLE_CYAN).$subject.$lineBreak;
-				}
-				break;
-			case self::LOG_ERROR:
-				echo $this->coloredOutput($str, $color ?: static::CONSOLE_RED).$subject.$lineBreak;
-				break;
-			case self::LOG_HALT:
-				echo $this->coloredOutput($str, $color ?: static::CONSOLE_PURPLE).$subject.$lineBreak;
-				exit;
-		}
-	}
-
-	protected function coloredOutput($str, $color = null)
-	{
-		return ($this->colored && $color !== null) ? "\033[".$color."m".$str."\033[37m" : $str;
 	}
 
 	/**
@@ -351,6 +312,9 @@ TXT;
 		$this->resetConsoleColor();
 	}
 
+	/**
+	 * If colored output is enabled, resets console colors
+	 */
 	public function resetConsoleColor()
 	{
 		if ($this->colored) {
@@ -358,6 +322,9 @@ TXT;
 		}
 	}
 
+	/**
+	 * Recursively loads .tags and indexes them
+	 */
 	protected function loadLibrary()
 	{
 		$files = $this->isWindows
@@ -434,7 +401,7 @@ TXT;
 	}
 
 	/**
-	 * Produces m-TAGS compatible snapshot of a directory
+	 * Matches releases and prepares new ones
 	 *
 	 * @param string $dir
 	 * @param array $contents
@@ -708,8 +675,10 @@ TXT;
 			switch ($ext) {
 				case "mp3":
 				case "flac":
-					$tags['DATE'] = $tags['YEAR'];
-					unset($tags['YEAR']);
+					if (empty($tags['DATE'])) {
+						$tags['DATE'] = $tags['YEAR'];
+						unset($tags['YEAR']);
+					}
 			}
 		}
 
@@ -1046,7 +1015,6 @@ TXT;
 
 	/**
 	 * Recursive mkdir
-	 * In PHP <=5.6, mkdir creates directories recursively only one level deep.
 	 *
 	 * @param $path
 	 * @param int $chmod
@@ -1059,7 +1027,11 @@ TXT;
 			return true;
 		}
 
-		$path = str_replace(['\\', '/'], DS, $path);
+		if (!$this->isWindows) {
+			return mkdir(str_replace('\\', '/', $path), $chmod, $recursive);
+		}
+
+		$path = str_replace('/', DS, $path);
 
 		if (!$recursive) {
 			return mkdir($this->win.$path, $chmod);
@@ -1103,5 +1075,33 @@ TXT;
 		}
 
 		return $str;
+	}
+
+	/**
+	 * @param $str
+	 * @param int $level
+	 * @param null $subject
+	 * @param string $lineBreak
+	 * @param null $color
+	 */
+	public function log($str, $level = self::LOG_INFO, $subject = null, $lineBreak = "\n\n", $color = null)
+	{
+		if ($this->verbose === false) {
+			return;
+		}
+
+		if (!isset(static::$verboseLevels[$level]) || $this->verbose) {
+			echo $this->coloredOutput($str, $color ?: static::$consoleColors[$level]).($subject ? "\n" : '').$subject.$lineBreak;
+		}
+	}
+
+	/**
+	 * @param string $str
+	 * @param null $color
+	 * @return string
+	 */
+	protected function coloredOutput($str, $color = null)
+	{
+		return ($this->colored && $color !== null) ? "\033[".$color."m".$str."\033[37m" : $str;
 	}
 }
