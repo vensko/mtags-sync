@@ -1,8 +1,6 @@
 # mtags-sync
 Command-line app to keep the m-TAGS (www.m-tags.org) library up to date with Unicode support.
 
-NOT ready for usage yet!
-
 # Usage
 Windows:
 ```
